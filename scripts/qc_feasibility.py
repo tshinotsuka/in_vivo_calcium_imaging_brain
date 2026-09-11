@@ -538,7 +538,7 @@ def main(argv=None) -> int:
     stat = np.load(s2p / "stat.npy", allow_pickle=True)
     iscell = np.load(s2p / "iscell.npy")
     ops = {}
-    for cand in ("ops.npy", "db.npy"):
+    for cand in ("reg_outputs.npy", "detect_outputs.npy", "ops.npy", "db.npy"):
         if (s2p / cand).exists():
             ops.update(np.load(s2p / cand, allow_pickle=True).item())
     if not ops:

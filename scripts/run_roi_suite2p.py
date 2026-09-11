@@ -173,6 +173,18 @@ def main(argv=None) -> int:
                    choices=["meanImg", "max_proj", "max_proj / meanImg"],
                    help="image Cellpose segments. meanImg is activity-independent; max_proj "
                         "shows active somata far more clearly but weights cells by activity")
+    p.add_argument("--cellprob-threshold", type=float, default=None,
+                   help="Cellpose acceptance threshold (default 0.0). Lower values keep "
+                        "dimmer or less certain masks, so visibly bright somata that were "
+                        "skipped are usually recovered here first")
+    p.add_argument("--flow-threshold", type=float, default=None,
+                   help="Cellpose flow-error tolerance (default 0.4). Higher values keep "
+                        "masks whose shape is less canonical")
+    p.add_argument("--highpass-spatial", type=int, default=None,
+                   help="spatial high-pass applied before Cellpose; helps when uneven "
+                        "background brightness hides cells in part of the field")
+    p.add_argument("--cellpose-model", default=None,
+                   help="Cellpose model name (default cpsam)")
     p.add_argument("--high-pass", type=int, default=100)
     p.add_argument("--inner-neuropil-radius", type=int, default=2)
     p.add_argument("--min-neuropil-pixels", type=int, default=350)
@@ -331,7 +343,16 @@ def main(argv=None) -> int:
     if args.anatomical_only:
         # anatomical detection on the mean image: activity-independent, so a
         # condition with lower activity does not silently yield fewer ROIs.
-        det.setdefault("cellpose_settings", {})["img"] = args.cellpose_img
+        cp_set = det.setdefault("cellpose_settings", {})
+        cp_set["img"] = args.cellpose_img
+        if args.cellprob_threshold is not None:
+            cp_set["cellprob_threshold"] = args.cellprob_threshold
+        if args.flow_threshold is not None:
+            cp_set["flow_threshold"] = args.flow_threshold
+        if args.highpass_spatial is not None:
+            cp_set["highpass_spatial"] = args.highpass_spatial
+        if args.cellpose_model:
+            cp_set["cellpose_model"] = args.cellpose_model
 
     ext = sub("extraction")
     ext["neuropil_extract"] = True
@@ -374,7 +395,7 @@ def main(argv=None) -> int:
     db = dict(suite2p.default_db())
     db.update(
         data_path=[str(stage)],
-        tiff_list=[f.name for f in staged],
+        file_list=[f.name for f in staged],  # `tiff_list` is not a db key
         save_path0=str(save_path),
         nplanes=1,
         nchannels=1,
@@ -388,7 +409,9 @@ def main(argv=None) -> int:
         print(f"  spatial_scale       : {sp['spatial_scale']}"
               f"{' (auto)' if sp['spatial_scale'] == 0 else ''}")
     else:
-        print(f"  cellpose img        : {det['cellpose_settings']['img']}")
+        _c = det["cellpose_settings"]
+        print(f"  cellpose img        : {_c['img']}")
+        print(f"  cellprob/flow       : {_c.get('cellprob_threshold')} / {_c.get('flow_threshold')}")
     print(f"  deconvolution       : {run['do_deconvolution']}")
     suite2p.run_s2p(db=db, settings=settings)
 
