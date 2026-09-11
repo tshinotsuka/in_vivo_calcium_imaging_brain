@@ -1,0 +1,82 @@
+{
+  "s2p_dir": "/media/tshino/DATA/workspace/2026_aqp4ko_water_intoxication/2photon/20260803_sub-sk28_ses-01/work/s2p_func/suite2p/plane0",
+  "fs_hz": 13.2908,
+  "n_frames": 4000,
+  "duration_min": 5.016001043328217,
+  "neucoeff": 0.7,
+  "rois": {
+    "n_detected": 125,
+    "n_accepted": 125,
+    "median_roi_diameter_px": 3.1915382432114616,
+    "frac_roi_under_8px": 1.0
+  },
+  "detector_range": {
+    "source": "binary",
+    "p99_99": 530.0,
+    "frac_saturated": 0.0,
+    "frac_at_or_below_zero": 0.0043780517578125
+  },
+  "nu": {
+    "median": 86.40822894489814,
+    "q25": 42.578097514225824,
+    "q75": 277.9675681823023
+  },
+  "photostability": {
+    "pct_change_end_vs_start": -2.83393931388855
+  },
+  "signal_reality": {
+    "median_skew": 1.5803067684173584,
+    "median_skew_surrogate": -0.001516037038527429,
+    "frac_roi_skew_above_surrogate_p99": 1.0,
+    "median_autocorr_halfwidth_s": 1.1670509576797485,
+    "median_autocorr_halfwidth_surrogate_s": 1.1325753927230835,
+    "one_frame_s": 0.07524001564992325,
+    "indicator_tau_s": 0.27,
+    "median_soma_neuropil_corr": 0.06988725069442292
+  },
+  "brain_state": {
+    "median_pairwise_corr": 0.014744746345006707,
+    "median_shuffled_corr": -0.0006963642494359208,
+    "synchrony_excess": 0.015441110594442628,
+    "slow_to_fast_power_ratio": 1.0015122890472412,
+    "interpretation": "high synchrony and slow-dominated power suggest a deep plane with up/down structure; low synchrony suggests a light plane or a near-awake animal. Not a feasibility criterion."
+  },
+  "transients": {
+    "median_peak_dff_pct": 2762.423095703125,
+    "median_peak_over_nu": 25.90665739318761,
+    "active_fraction": 1.0,
+    "threshold_k": 5.0
+  },
+  "checks": [
+    {
+      "name": "waveform asymmetry",
+      "pass": true,
+      "detail": "100% of ROIs exceed the phase-randomised 99th pct (skew 1.58 vs -0.00)"
+    },
+    {
+      "name": "temporal structure",
+      "pass": true,
+      "detail": "autocorr half-width 1.17s (one frame 0.075s, indicator 0.27s)"
+    },
+    {
+      "name": "transients present",
+      "pass": true,
+      "detail": "median peak / nu = 25.9, active 100%"
+    },
+    {
+      "name": "ROI size adequate",
+      "pass": false,
+      "detail": "median ROI diameter 3.2 px"
+    },
+    {
+      "name": "no heavy saturation",
+      "pass": true,
+      "detail": "saturated 0.000%"
+    },
+    {
+      "name": "photostable",
+      "pass": true,
+      "detail": "raw F change over recording -2.8%"
+    }
+  ]
+}

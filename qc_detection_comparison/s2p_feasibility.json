@@ -1,0 +1,82 @@
+{
+  "s2p_dir": "/media/tshino/DATA/workspace/2026_aqp4ko_water_intoxication/2photon/20260803_sub-sk28_ses-01/work/s2p/suite2p/plane0",
+  "fs_hz": 13.2908,
+  "n_frames": 4000,
+  "duration_min": 5.016001043328217,
+  "neucoeff": 0.7,
+  "rois": {
+    "n_detected": 15,
+    "n_accepted": 15,
+    "median_roi_diameter_px": 7.569397566060481,
+    "frac_roi_under_8px": 0.6666666666666666
+  },
+  "detector_range": {
+    "source": "binary",
+    "p99_99": 530.0,
+    "frac_saturated": 0.0,
+    "frac_at_or_below_zero": 0.0043780517578125
+  },
+  "nu": {
+    "median": 7.998159369821184,
+    "q25": 7.146731427907118,
+    "q75": 12.219287011151351
+  },
+  "photostability": {
+    "pct_change_end_vs_start": -6.017296314239502
+  },
+  "signal_reality": {
+    "median_skew": 2.468393087387085,
+    "median_skew_surrogate": 0.026001526042819023,
+    "frac_roi_skew_above_surrogate_p99": 0.9333333333333333,
+    "median_autocorr_halfwidth_s": 0.6469078660011292,
+    "median_autocorr_halfwidth_surrogate_s": 0.6490360498428345,
+    "one_frame_s": 0.07524001564992325,
+    "indicator_tau_s": 0.27,
+    "median_soma_neuropil_corr": 0.15399332387260073
+  },
+  "brain_state": {
+    "median_pairwise_corr": 0.04027624555005439,
+    "median_shuffled_corr": -0.0025271856179497907,
+    "synchrony_excess": 0.04280343116800418,
+    "slow_to_fast_power_ratio": 1.7321804761886597,
+    "interpretation": "high synchrony and slow-dominated power suggest a deep plane with up/down structure; low synchrony suggests a light plane or a near-awake animal. Not a feasibility criterion."
+  },
+  "transients": {
+    "median_peak_dff_pct": 316.57733154296875,
+    "median_peak_over_nu": 39.6657765609499,
+    "active_fraction": 1.0,
+    "threshold_k": 5.0
+  },
+  "checks": [
+    {
+      "name": "waveform asymmetry",
+      "pass": true,
+      "detail": "93% of ROIs exceed the phase-randomised 99th pct (skew 2.47 vs 0.03)"
+    },
+    {
+      "name": "temporal structure",
+      "pass": true,
+      "detail": "autocorr half-width 0.65s (one frame 0.075s, indicator 0.27s)"
+    },
+    {
+      "name": "transients present",
+      "pass": true,
+      "detail": "median peak / nu = 39.7, active 100%"
+    },
+    {
+      "name": "ROI size adequate",
+      "pass": false,
+      "detail": "median ROI diameter 7.6 px"
+    },
+    {
+      "name": "no heavy saturation",
+      "pass": true,
+      "detail": "saturated 0.000%"
+    },
+    {
+      "name": "photostable",
+      "pass": true,
+      "detail": "raw F change over recording -6.0%"
+    }
+  ]
+}

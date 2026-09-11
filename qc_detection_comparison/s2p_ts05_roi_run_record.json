@@ -1,0 +1,134 @@
+{
+  "date_run": "2026-08-04",
+  "dataset": "/media/tshino/DATA/workspace/2026_aqp4ko_water_intoxication/2photon/20260803_sub-sk28_ses-01",
+  "inputs": [
+    "sk28_ch0_rigid_then_piecewise_MC.tif"
+  ],
+  "n_frames": 4000,
+  "frame_shape_px": [
+    128,
+    128
+  ],
+  "fs_hz": 13.2908,
+  "pixel_size_um": 1.9617,
+  "metadata_source": "/media/tshino/DATA/workspace/2026_aqp4ko_water_intoxication/2photon/20260803_sub-sk28_ses-01/raw/metadata.yaml",
+  "objective": null,
+  "suite2p_version": "1.1.0",
+  "torch_device": "cuda",
+  "settings": {
+    "torch_device": "cuda",
+    "tau": 0.5,
+    "fs": 13.2908,
+    "diameter": [
+      8.0,
+      8.0
+    ],
+    "run": {
+      "do_registration": 0,
+      "do_regmetrics": false,
+      "do_detection": true,
+      "do_deconvolution": false,
+      "multiplane_parallel": false
+    },
+    "io": {
+      "combined": true,
+      "save_mat": false,
+      "save_NWB": false,
+      "save_ops_orig": true,
+      "delete_bin": false,
+      "move_bin": false
+    },
+    "registration": {
+      "align_by_chan2": false,
+      "nimg_init": 400,
+      "maxregshift": 0.1,
+      "do_bidiphase": false,
+      "bidiphase": 0.0,
+      "batch_size": 100,
+      "nonrigid": true,
+      "maxregshiftNR": 5,
+      "block_size": [
+        128,
+        128
+      ],
+      "smooth_sigma_time": 0,
+      "smooth_sigma": 1.15,
+      "spatial_taper": 3.45,
+      "th_badframes": 1.0,
+      "norm_frames": true,
+      "snr_thresh": 1.2,
+      "subpixel": 10,
+      "two_step_registration": false,
+      "reg_tif": false,
+      "reg_tif_chan2": false,
+      "upsample_meanImg": null
+    },
+    "detection": {
+      "algorithm": "sparsery",
+      "denoise": false,
+      "block_size": [
+        64,
+        64
+      ],
+      "nbins": 5000,
+      "bin_size": null,
+      "highpass_time": 100,
+      "threshold_scaling": 0.5,
+      "npix_norm_min": 0.0,
+      "npix_norm_max": 100,
+      "max_overlap": 0.75,
+      "soma_crop": true,
+      "chan2_threshold": 0.25,
+      "cellpose_chan2": false,
+      "sparsery_settings": {
+        "highpass_neuropil": 25,
+        "max_ROIs": 5000,
+        "spatial_scale": 0,
+        "active_percentile": 0.0
+      },
+      "sourcery_settings": {
+        "connected": true,
+        "max_iterations": 20,
+        "smooth_masks": false
+      },
+      "cellpose_settings": {
+        "cellpose_model": "cpsam",
+        "img": "max_proj / meanImg",
+        "highpass_spatial": 0,
+        "flow_threshold": 0.4,
+        "cellprob_threshold": 0.0,
+        "params": null,
+        "params_chan2": null
+      }
+    },
+    "classification": {
+      "classifier_path": null,
+      "use_builtin_classifier": false,
+      "preclassify": 0.0
+    },
+    "extraction": {
+      "snr_threshold": 0.0,
+      "batch_size": 500,
+      "neuropil_extract": true,
+      "neuropil_coefficient": 0.7,
+      "inner_neuropil_radius": 2,
+      "min_neuropil_pixels": 350,
+      "lam_percentile": 50.0,
+      "allow_overlap": false,
+      "circular_neuropil": false
+    },
+    "dcnv_preprocess": {
+      "baseline": "maximin",
+      "win_baseline": 60.0,
+      "sig_baseline": 10.0,
+      "prctile_baseline": 8.0
+    },
+    "version": "1.1.0"
+  },
+  "python": "3.11.15",
+  "diameter_px": 8,
+  "anatomical_only": 0,
+  "n_roi_detected": 1737,
+  "n_roi_iscell": 375,
+  "note": "registration by caiman; suite2p do_registration=0. deconvolution unused (spks.npy ignored). neucoeff not baked in: F and Fneu saved separately."
+}
