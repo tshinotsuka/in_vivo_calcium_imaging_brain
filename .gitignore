@@ -1,0 +1,25 @@
+# Local config
+config/paths.yaml
+
+# Data and outputs
+data/
+results/
+work/
+*.tif
+*.tiff
+*.nd2
+*.czi
+*.lif
+*.oir
+*.oib
+*.mmap
+*.h5
+*.hdf5
+*.npy
+*.npz
+
+# OS / IDE / notebook
+.DS_Store
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
