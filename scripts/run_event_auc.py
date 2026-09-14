@@ -90,6 +90,33 @@ def exp_smooth(x: np.ndarray, tau_frames: float) -> np.ndarray:
     return out
 
 
+def matched_filter(x: np.ndarray, tau_frames: float) -> np.ndarray:
+    """Correlate each trace with the indicator's own transient shape.
+
+    A calcium transient rises within a frame and decays with the indicator's
+    time constant, so noise that is white across frames is suppressed by
+    roughly the square root of the number of frames the decay spans while the
+    transient itself is preserved. At 13 Hz with a 0.27 s decay that is about a
+    factor of two in amplitude signal-to-noise, which is the single largest
+    improvement available without changing the acquisition.
+
+    The kernel is applied symmetrically so that event onsets are not delayed;
+    a causal filter would shift every onset later by about one time constant.
+    """
+    if tau_frames <= 0:
+        return x.astype(np.float32)
+    n = max(int(np.ceil(6 * tau_frames)), 3)
+    h = np.exp(-np.arange(n) / tau_frames)
+    h = h / h.sum()          # unit area, so a slow transient keeps its amplitude
+    pad = n
+    out = np.empty_like(x, dtype=np.float32)
+    for i in range(x.shape[0]):
+        v = np.pad(x[i], pad, mode="reflect")
+        c = np.convolve(v, h[::-1], mode="same")[pad:-pad]
+        out[i] = c
+    return out
+
+
 def robust_sd(x: np.ndarray) -> np.ndarray:
     d = np.abs(np.diff(x, axis=1))
     return np.median(d, axis=1) / (np.sqrt(2) * 0.6745)
@@ -108,6 +135,7 @@ class Event:
     amplitude: float      # peak dF/F, percent
     duration_s: float
     area: float           # integral of dF/F over the event, percent-seconds
+    area_df: float = 0.0  # integral of F - F0 over the same window, a.u.-seconds
 
 
 def _scan(trace: np.ndarray, sd: float, on_k: float, off_k: float, sign: int):
@@ -138,10 +166,13 @@ def _scan(trace: np.ndarray, sd: float, on_k: float, off_k: float, sign: int):
     return [(a, b) for a, b in merged]
 
 
-def detect_events(d_pct: np.ndarray, fs: float, *, on_k: float = 3.0,
+def detect_events(d_pct: np.ndarray, fs: float, *, df_raw: np.ndarray | None = None,
+                  on_k: float = 3.0,
                   off_k: float = 0.5, min_dur_s: float = 0.5,
                   fp_max: float = 0.05, amp_bin_sd: float = 0.5,
-                  dur_bin_s: float = 0.25, n_passes: int = 2):
+                  dur_bin_s: float = 0.25, n_passes: int = 2,
+                  fp_method: str = "bin", min_bin_count: int = 5,
+                  roi_alpha: float = 0.05):
     """Significant transients per ROI, with a false-positive rate below fp_max.
 
     Returns (events, kept_bins, stats). Negative-going excursions supply the
@@ -157,13 +188,23 @@ def detect_events(d_pct: np.ndarray, fs: float, *, on_k: float = 3.0,
 
     for p in range(max(n_passes, 1)):
         if p > 0:
-            # recompute the threshold from frames that held no event, so that
-            # large transients do not raise the bar against themselves
+            # Recompute the threshold from frames that held no event, so large
+            # transients do not raise the bar against themselves. Here the
+            # spread of the VALUES is used, not of the frame-to-frame
+            # differences: once a trace has been smoothed its noise is
+            # correlated between frames, so a difference-based estimate reads
+            # far below the true spread and the threshold collapses. The
+            # first pass still uses the difference-based estimate, which needs
+            # no event mask to be robust.
             sd = np.empty(n_roi, np.float32)
             for i in range(n_roi):
                 free = d_pct[i][~mask[i]]
-                sd[i] = (robust_sd(free[None, :])[0] if free.size > 10
-                         else robust_sd(d_pct[i][None, :])[0])
+                if free.size > 10:
+                    sd[i] = 1.4826 * np.median(np.abs(free - np.median(free)))
+                else:
+                    sd[i] = robust_sd(d_pct[i][None, :])[0]
+                if not np.isfinite(sd[i]) or sd[i] <= 0:
+                    sd[i] = max(robust_sd(d_pct[i][None, :])[0], 1e-6)
         pos_all, neg_all = [], []
         mask = np.zeros_like(d_pct, bool)
         for i in range(n_roi):
@@ -193,16 +234,91 @@ def detect_events(d_pct: np.ndarray, fs: float, *, on_k: float = 3.0,
 
     pb, nb = binned(pos_all), binned(neg_all)
     kept_bins, rates = set(), {}
-    for key, evs in pb.items():
-        fp = len(nb.get(key, [])) / max(len(evs), 1)
-        rates[key] = fp
-        if fp < fp_max:
-            kept_bins.add(key)
+    cum_thresh = None
+
+    if fp_method == "cumulative":
+        # With few events a per-bin ratio is unstable: a bin holding one
+        # positive and one negative reads as a 100% false-positive rate and is
+        # discarded, while a bin holding one positive and none reads as 0% and
+        # is kept. Instead, sweep a single amplitude threshold and take the
+        # lowest one at which the negatives remaining above it are under
+        # fp_max of the positives. One threshold estimated from all the events
+        # is far better determined than many thresholds from a handful each.
+        pos = np.array([e[3] for e in pos_all if e[4] >= min_dur_s])
+        neg = np.array([e[3] for e in neg_all if e[4] >= min_dur_s])
+        cand = np.unique(np.round(np.sort(pos), 2)) if pos.size else np.array([])
+        cum_thresh = float("inf")
+        for a in cand:
+            npos = int((pos >= a).sum())
+            nneg = int((neg >= a).sum())
+            if npos >= 5 and nneg / max(npos, 1) < fp_max:
+                cum_thresh = float(a)
+                break
+        for key, evs in pb.items():
+            keep_any = any(e[3] >= cum_thresh for e in evs)
+            rates[key] = 0.0 if keep_any else 1.0
+            if keep_any:
+                kept_bins.add(key)
+    else:
+        for key, evs in pb.items():
+            if len(evs) < min_bin_count:
+                # too few to estimate a rate from; pool with the same amplitude
+                # bin across all durations rather than judging it alone
+                same_amp_p = sum(len(v) for k, v in pb.items() if k[0] == key[0])
+                same_amp_n = sum(len(v) for k, v in nb.items() if k[0] == key[0])
+                fp = same_amp_n / max(same_amp_p, 1)
+            else:
+                fp = len(nb.get(key, [])) / max(len(evs), 1)
+            rates[key] = fp
+            if fp < fp_max:
+                kept_bins.add(key)
+
+    kept_raw = [e for key in kept_bins for e in pb[key]
+                if cum_thresh is None or e[3] >= cum_thresh]
+
+    # Per-ROI test. The amplitude-by-duration test above controls the false
+    # positive rate over the whole population, which leaves individual ROIs
+    # unprotected: cells that are silent, and ROIs that are not cells at all,
+    # contribute only false positives while the active cells keep the pooled
+    # rate low. Within one ROI the null is simple -- noise produces upward and
+    # downward excursions with equal probability -- so a binomial test on that
+    # ROI's own counts asks whether it has more upward excursions than chance.
+    # An ROI that fails contributes no events, and therefore an activity rate
+    # of zero rather than a spurious one.
+    rejected_rois: set[int] = set()
+    if roi_alpha and roi_alpha > 0:
+        thr = cum_thresh if cum_thresh is not None else 0.0
+        keys_kept = kept_bins
+        for i in range(n_roi):
+            npos = sum(1 for e in kept_raw if e[0] == i)
+            nneg = sum(1 for e in neg_all
+                       if e[0] == i and e[4] >= min_dur_s and e[3] >= thr
+                       and (fp_method == "cumulative"
+                            or (int(e[3] / amp_bin_sd),
+                                int(e[4] / dur_bin_s)) in keys_kept))
+            n = npos + nneg
+            if n == 0:
+                continue
+            # P(X >= npos) under Binomial(n, 0.5)
+            from math import comb
+            pval = sum(comb(n, k) for k in range(npos, n + 1)) / (2.0 ** n)
+            if pval > roi_alpha:
+                rejected_rois.add(i)
+
+    def _df_area(i, a, b):
+        # The same window, integrated in raw units. dF/F divides by a baseline
+        # that is itself falling, so a transient of unchanging absolute size
+        # grows in dF/F as the preparation dims; the raw integral does not,
+        # and the pair separates a multiplicative change from a real one.
+        if df_raw is None:
+            return 0.0
+        return float(df_raw[i, a:b].sum()) / fs
 
     events = [Event(roi=e[0], onset=e[1], offset=e[2],
                     amplitude=e[3] * float(sd[e[0]]),   # sd units -> percent
-                    duration_s=e[4], area=e[5])          # already percent-seconds
-              for key in kept_bins for e in pb[key]]
+                    duration_s=e[4], area=e[5],          # already percent-seconds
+                    area_df=_df_area(e[0], e[1], e[2]))
+              for e in kept_raw if e[0] not in rejected_rois]
     events.sort(key=lambda e: (e.roi, e.onset))
 
     stats = {
@@ -210,19 +326,25 @@ def detect_events(d_pct: np.ndarray, fs: float, *, on_k: float = 3.0,
         "n_bins": len(pb), "n_bins_kept": len(kept_bins),
         "n_events_kept": len(events),
         "median_sd_pct": float(np.median(sd)),
+        "fp_method": fp_method,
+        "roi_alpha": roi_alpha,
+        "n_roi_rejected": len(rejected_rois),
+        "cumulative_amplitude_threshold_sd": (None if cum_thresh is None
+                                              else round(cum_thresh, 3)),
         "false_positive_rates": {f"{k[0]}_{k[1]}": round(v, 4)
                                  for k, v in sorted(rates.items())},
     }
     return events, kept_bins, stats
 
 
-def auc_per_min(events, n_roi: int, a: int, b: int, fs: float) -> np.ndarray:
+def auc_per_min(events, n_roi: int, a: int, b: int, fs: float,
+                field: str = "area") -> np.ndarray:
     """Cumulative event area within [a, b), per minute of recording, per ROI."""
     dur_min = (b - a) / fs / 60.0
     out = np.zeros(n_roi, float)
     for e in events:
         if e.onset >= a and e.offset <= b:
-            out[e.roi] += e.area
+            out[e.roi] += getattr(e, field)
     return out / max(dur_min, 1e-9)
 
 
@@ -262,8 +384,28 @@ def main(argv=None) -> int:
     p.add_argument("--neucoeff", type=float, default=0.7)
     p.add_argument("--baseline-window-s", type=float, default=15.0,
                    help="window for the running median baseline")
+    p.add_argument("--smooth", choices=["exp", "matched", "none"], default="exp",
+                   help="'exp' reproduces the published method; 'matched' filters "
+                        "with the indicator's own decay and recovers roughly a "
+                        "factor of two in signal-to-noise at this frame rate")
     p.add_argument("--smooth-tau-s", type=float, default=0.2,
-                   help="exponential smoothing of dF/F before detection")
+                   help="time constant for --smooth exp")
+    p.add_argument("--indicator-tau-s", type=float, default=0.27,
+                   help="indicator decay for --smooth matched (jGCaMP8s ~0.27 s)")
+    p.add_argument("--fp-method", choices=["bin", "cumulative"], default="bin",
+                   help="'bin' is the published amplitude-by-duration test; "
+                        "'cumulative' fits one amplitude threshold to all events "
+                        "and is far better determined when events are scarce")
+    p.add_argument("--roi-alpha", type=float, default=0.05,
+                   help="per-ROI binomial test against its own downward "
+                        "excursions; 0 disables it. Protects individual ROIs, "
+                        "which the pooled test does not")
+    p.add_argument("--min-bin-count", type=int, default=5,
+                   help="bins with fewer positives than this are pooled across "
+                        "durations instead of judged on their own")
+    p.add_argument("--sweep", action="store_true",
+                   help="report detection over a grid of settings and stop, "
+                        "without writing figures")
     p.add_argument("--onset-sd", type=float, default=3.0)
     p.add_argument("--offset-sd", type=float, default=0.5)
     p.add_argument("--min-duration-s", type=float, default=0.5)
@@ -357,22 +499,115 @@ def main(argv=None) -> int:
     win_b = int(round(args.baseline_window_s * fs))
     for _, a, b in segs:
         F0[:, a:b] = percentile_filter(Fc[:, a:b], win_b, 50.0)
+    df_raw = (Fc - F0).astype(np.float32)     # absolute units, same baseline
     d = (Fc - F0) / np.maximum(F0, 1.0) * 100.0
-    d = exp_smooth(d, args.smooth_tau_s * fs)
+    if args.smooth == "matched":
+        d = matched_filter(d, args.indicator_tau_s * fs)
+    elif args.smooth == "exp":
+        d = exp_smooth(d, args.smooth_tau_s * fs)
+
+    if args.sweep:
+        print(f"\n{'smooth':9s} {'onset':>6} {'fp':>11} {'events':>7} "
+              f"{'ROIs>0':>7} {'AUC/min':>9}  (mean over ROIs and runs)")
+        base = (Fc - F0) / np.maximum(F0, 1.0) * 100.0
+        for sm in ("none", "exp", "matched"):
+            if sm == "matched":
+                ds = matched_filter(base, args.indicator_tau_s * fs)
+            elif sm == "exp":
+                ds = exp_smooth(base, args.smooth_tau_s * fs)
+            else:
+                ds = base.astype(np.float32)
+            for onk in (2.0, 2.5, 3.0):
+                for meth in ("bin", "cumulative"):
+                    ev, _, st = detect_events(
+                        ds, fs, on_k=onk, off_k=args.offset_sd,
+                        min_dur_s=args.min_duration_s, fp_max=args.fp_max,
+                        fp_method=meth, min_bin_count=args.min_bin_count,
+                        roi_alpha=args.roi_alpha)
+                    mat = np.stack([auc_per_min(ev, n_roi, a, b, fs)
+                                    for _, a, b in segs], axis=1)
+                    print(f"{sm:9s} {onk:6.1f} {meth:>11s} "
+                          f"{st['n_events_kept']:7d} "
+                          f"{int((mat.sum(axis=1) > 0).sum()):7d} "
+                          f"{mat.mean():9.2f}")
+        print("\nROIs>0 is how many of "
+              f"{n_roi} ROIs had at least one counted event anywhere.")
+        return 0
 
     events, kept_bins, ev_stats = detect_events(
-        d, fs, on_k=args.onset_sd, off_k=args.offset_sd,
-        min_dur_s=args.min_duration_s, fp_max=args.fp_max)
+        d, fs, df_raw=df_raw, on_k=args.onset_sd, off_k=args.offset_sd,
+        min_dur_s=args.min_duration_s, fp_max=args.fp_max,
+        fp_method=args.fp_method, min_bin_count=args.min_bin_count,
+        roi_alpha=args.roi_alpha)
     print(f"\nevents: {ev_stats['n_positive_raw']} positive, "
           f"{ev_stats['n_negative_raw']} negative (the null) detected raw")
     print(f"  amplitude x duration bins: {ev_stats['n_bins_kept']} of "
           f"{ev_stats['n_bins']} pass the {args.fp_max:.0%} false-positive test")
     print(f"  {ev_stats['n_events_kept']} events counted; "
           f"median threshold sd = {ev_stats['median_sd_pct']:.2f} %dF/F")
+    if ev_stats.get("n_roi_rejected"):
+        print(f"  {ev_stats['n_roi_rejected']} ROI(s) had no more upward than "
+              f"downward excursions and were given an activity rate of zero")
 
     by_roi_run = np.zeros((n_roi, len(segs)))
+    df_by_roi_run = np.zeros((n_roi, len(segs)))
     for k, (_, a, b) in enumerate(segs):
-        by_roi_run[:, k] = auc_per_min(events, n_roi, a, b, fs)
+        by_roi_run[:, k] = auc_per_min(events, n_roi, a, b, fs, "area")
+        df_by_roi_run[:, k] = auc_per_min(events, n_roi, a, b, fs, "area_df")
+
+    # --- raw fluorescence, per acquisition ---------------------------------
+    # Reported before any normalisation, because every normalised quantity
+    # downstream is divided by this and a fall here changes them all.
+    rawF = np.array([[float(F[i, a:b].mean()) for _, a, b in segs]
+                     for i in range(n_roi)])
+    rawF0 = np.array([[float(np.median(F0[i, a:b])) for _, a, b in segs]
+                      for i in range(n_roi)])
+    rawFneu = np.array([[float(Fneu[i, a:b].mean()) for _, a, b in segs]
+                        for i in range(n_roi)])
+    nu_run = np.array([[float(np.median(np.abs(np.diff(d[i, a:b])))
+                              / np.sqrt(fs)) for _, a, b in segs]
+                       for i in range(n_roi)])
+
+    def pct(x):
+        return (x[:, -1].mean() - x[:, 0].mean()) / max(abs(x[:, 0].mean()), 1e-9) * 100
+
+    print(f"\nraw fluorescence across the series (run 1 -> run {len(segs)}):")
+    print(f"  F      {rawF[:, 0].mean():8.1f} -> {rawF[:, -1].mean():8.1f}   "
+          f"{pct(rawF):+6.1f}%")
+    print(f"  F0     {rawF0[:, 0].mean():8.1f} -> {rawF0[:, -1].mean():8.1f}   "
+          f"{pct(rawF0):+6.1f}%")
+    print(f"  Fneu   {rawFneu[:, 0].mean():8.1f} -> {rawFneu[:, -1].mean():8.1f}   "
+          f"{pct(rawFneu):+6.1f}%")
+    print(f"  nu     {np.median(nu_run[:, 0]):8.2f} -> "
+          f"{np.median(nu_run[:, -1]):8.2f}   {pct(nu_run):+6.1f}%")
+
+    act = by_roi_run.sum(axis=1) > 0
+    if act.any():
+        a_dff = pct(by_roi_run[act])
+        a_df = pct(df_by_roi_run[act])
+        f_pct = pct(rawF0)
+        print(f"\nactivity rate, both normalisations "
+              f"(n = {int(act.sum())} ROIs with any event):")
+        print(f"  dF/F AUC/min  {by_roi_run[act, 0].mean():8.2f} -> "
+              f"{by_roi_run[act, -1].mean():8.2f}   {a_dff:+6.1f}%")
+        print(f"  dF   AUC/min  {df_by_roi_run[act, 0].mean():8.2f} -> "
+              f"{df_by_roi_run[act, -1].mean():8.2f}   {a_df:+6.1f}%")
+        # dF/F divides out anything multiplicative; dF does not. Comparing the
+        # two against the baseline's own change says which kind of change this
+        # is, without needing to know its cause.
+        if abs(a_dff) < 10 and abs(a_df - f_pct) < 10:
+            verdict = ("consistent with a purely multiplicative change "
+                       "(bleaching, dilution or axial drift): dF tracks F0 "
+                       "while dF/F is flat")
+        elif a_dff < -10 and a_df < -10:
+            verdict = "both fall: consistent with a real decline in activity"
+        elif a_dff < -10 and abs(a_df) < 10:
+            verdict = ("dF/F falls while dF holds: the baseline is rising, "
+                       "not the transients shrinking")
+        else:
+            verdict = "mixed; neither reading is clean on its own"
+        print(f"  F0 changed {f_pct:+.1f}% over the same interval")
+        print(f"  -> {verdict}")
 
     silent = (by_roi_run.sum(axis=1) == 0)
     if silent.any():
@@ -503,8 +738,8 @@ def main(argv=None) -> int:
               f"mean AUC/min {vals.mean():7.3f} -> {stem.name}.png/.pdf")
 
     # --- across acquisitions -------------------------------------------------
-    fig, ax = plt.subplots(1, 2, figsize=(13, 4.8),
-                           gridspec_kw={"width_ratios": [1.2, 1.0]})
+    fig, ax = plt.subplots(1, 4, figsize=(22, 4.8),
+                           gridspec_kw={"width_ratios": [1.15, 1.15, 1.05, 1.0]})
     runs = np.arange(1, len(segs) + 1)
     # every ROI as a point, jittered so overlapping values stay countable, with
     # the paired lines faint behind them
@@ -529,20 +764,61 @@ def main(argv=None) -> int:
     for side in ("top", "right"):
         ax[0].spines[side].set_visible(False)
     ax[0].legend(fontsize=8, frameon=False)
-    ax[0].set_title("activity rate per ROI", fontsize=10, loc="left")
+    ax[0].set_title(r"activity rate per ROI ($\Delta$F/F)", fontsize=10, loc="left")
 
     order = np.argsort(-by_roi_run.mean(axis=1))
-    im = ax[1].imshow(by_roi_run[order], aspect="auto", cmap=args.cmap,
-                      vmin=0, vmax=vmax, interpolation="nearest")
-    ax[1].set_xticks(np.arange(len(segs)))
-    ax[1].set_xticklabels(runs)
-    ax[1].set_yticks(np.arange(n_roi))
-    ax[1].set_yticklabels([str(i + 1) for i in order], fontsize=6)
+    # panel 2: the same events integrated in raw units
+    for i in range(n_roi):
+        ax[1].plot(runs + jit[i], df_by_roi_run[i], lw=0.5, color=args.color_link,
+                   zorder=1)
+        ax[1].scatter(runs + jit[i], df_by_roi_run[i], s=args.point_size * 0.46,
+                      color=args.color_point or "0.45", zorder=2, linewidth=0)
+    md = df_by_roi_run.mean(axis=0)
+    sd_ = (df_by_roi_run.std(axis=0, ddof=1) / np.sqrt(n_roi) if n_roi > 1
+           else np.zeros(len(segs)))
+    ax[1].errorbar(runs, md, yerr=sd_, color=args.color_mean, lw=2.2, marker="o",
+                   ms=6, capsize=4, zorder=3, elinewidth=1.6)
     ax[1].set_xlabel("acquisition")
-    ax[1].set_ylabel("ROI (sorted by mean)")
-    cb = fig.colorbar(im, ax=ax[1], fraction=0.046)
+    ax[1].set_ylabel(r"$\Delta$F AUC/min (a.u.$\cdot$s / min)")
+    ax[1].set_xticks(runs)
+    ax[1].set_xlim(0.5, len(segs) + 0.5)
+    ax[1].set_ylim(bottom=min(0.0, float(df_by_roi_run.min()) * 1.1))
+    for side in ("top", "right"):
+        ax[1].spines[side].set_visible(False)
+    ax[1].set_title(r"same events, integrated in raw units",
+                    fontsize=10, loc="left")
+
+    # panel 3: the baseline everything else is divided by
+    for arr, lab, col in ((rawF, "F", "C3"), (rawF0, "F0", "C0"),
+                          (rawFneu, "Fneu", "C1")):
+        rel = arr.mean(axis=0) / max(arr[:, 0].mean(), 1e-9) * 100
+        ax[2].plot(runs, rel, marker="o", ms=5, lw=1.8, color=col, label=lab)
+    relA = by_roi_run[act].mean(axis=0) / max(by_roi_run[act, 0].mean(), 1e-9) * 100
+    relD = df_by_roi_run[act].mean(axis=0) / max(df_by_roi_run[act, 0].mean(), 1e-9) * 100
+    ax[2].plot(runs, relA, marker="s", ms=5, lw=1.6, ls="--", color="0.35",
+               label=r"$\Delta$F/F AUC")
+    ax[2].plot(runs, relD, marker="^", ms=5, lw=1.6, ls=":", color="0.55",
+               label=r"$\Delta$F AUC")
+    ax[2].axhline(100, color="0.8", lw=0.8, zorder=0)
+    ax[2].set_xlabel("acquisition")
+    ax[2].set_ylabel("percent of acquisition 1")
+    ax[2].set_xticks(runs)
+    ax[2].legend(fontsize=7, frameon=False)
+    for side in ("top", "right"):
+        ax[2].spines[side].set_visible(False)
+    ax[2].set_title("baseline and activity, on one scale", fontsize=10, loc="left")
+
+    im = ax[3].imshow(by_roi_run[order], aspect="auto", cmap=args.cmap,
+                      vmin=0, vmax=vmax, interpolation="nearest")
+    ax[3].set_xticks(np.arange(len(segs)))
+    ax[3].set_xticklabels(runs)
+    ax[3].set_yticks(np.arange(n_roi))
+    ax[3].set_yticklabels([str(i + 1) for i in order], fontsize=6)
+    ax[3].set_xlabel("acquisition")
+    ax[3].set_ylabel("ROI (sorted by mean)")
+    cb = fig.colorbar(im, ax=ax[3], fraction=0.046)
     cb.set_label("AUC/min", fontsize=8)
-    ax[1].set_title("every ROI, every acquisition", fontsize=10, loc="left")
+    ax[3].set_title("every ROI, every acquisition", fontsize=10, loc="left")
     fig.tight_layout()
     fig.savefig(out / "event_auc_summary.png", dpi=args.dpi, bbox_inches="tight")
     fig.savefig(out / "event_auc_summary.pdf", bbox_inches="tight")
@@ -551,41 +827,56 @@ def main(argv=None) -> int:
     # --- tables --------------------------------------------------------------
     with open(out / "auc_per_roi_per_run.csv", "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["roi", "run", "file", "auc_per_min", "n_events",
-                    "duration_min"])
+        w.writerow(["roi", "run", "file", "auc_per_min_dff", "auc_per_min_df",
+                    "n_events", "duration_min", "raw_F", "raw_F0", "raw_Fneu",
+                    "nu"])
         for k, (name, a, b) in enumerate(segs):
             dur = (b - a) / fs / 60.0
             for i in range(n_roi):
                 ne = sum(1 for e in events
                          if e.roi == i and a <= e.onset and e.offset <= b)
-                w.writerow([i + 1, k + 1, name, round(by_roi_run[i, k], 4), ne,
-                            round(dur, 3)])
+                w.writerow([i + 1, k + 1, name, round(by_roi_run[i, k], 4),
+                            round(df_by_roi_run[i, k], 4), ne, round(dur, 3),
+                            round(rawF[i, k], 2), round(rawF0[i, k], 2),
+                            round(rawFneu[i, k], 2), round(nu_run[i, k], 3)])
 
     with open(out / "events.csv", "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["roi", "onset_frame", "offset_frame", "t_onset_s",
-                    "duration_s", "peak_dff_pct", "area_pct_s"])
+                    "duration_s", "peak_dff_pct", "area_pct_s", "area_df_au_s"])
         for e in events:
             w.writerow([e.roi + 1, e.onset, e.offset, round(e.onset / fs, 3),
                         round(e.duration_s, 3), round(e.amplitude, 3),
-                        round(e.area, 4)])
+                        round(e.area, 4), round(e.area_df, 4)])
 
     with open(out / "auc_per_run.csv", "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["run", "file", "duration_min", "n_events",
-                    "auc_per_min_mean", "auc_per_min_sem"])
+                    "auc_dff_mean", "auc_dff_sem", "auc_df_mean", "auc_df_sem",
+                    "raw_F_mean", "raw_F0_mean", "raw_Fneu_mean", "nu_median"])
         for k, (name, a, b) in enumerate(segs):
             v = by_roi_run[:, k]
+            vd = df_by_roi_run[:, k]
             w.writerow([k + 1, name, round((b - a) / fs / 60, 3),
                         sum(1 for e in events if a <= e.onset and e.offset <= b),
                         round(float(v.mean()), 4),
-                        round(float(v.std(ddof=1) / np.sqrt(n_roi)), 4)])
+                        round(float(v.std(ddof=1) / np.sqrt(n_roi)), 4),
+                        round(float(vd.mean()), 4),
+                        round(float(vd.std(ddof=1) / np.sqrt(n_roi)), 4),
+                        round(float(rawF[:, k].mean()), 2),
+                        round(float(rawF0[:, k].mean()), 2),
+                        round(float(rawFneu[:, k].mean()), 2),
+                        round(float(np.median(nu_run[:, k])), 3)])
 
     with open(out / "event_auc_summary.json", "w") as fh:
         json.dump({
             "s2p_dir": str(s2p), "fs_hz": fs, "n_roi": n_roi,
             "n_frames": n_frames, "neucoeff": args.neucoeff,
-            "detection": {"onset_sd": args.onset_sd, "offset_sd": args.offset_sd,
+            "detection": {"smooth": args.smooth,
+                          "indicator_tau_s": args.indicator_tau_s,
+                          "fp_method": args.fp_method,
+                          "roi_alpha": args.roi_alpha,
+                          "onset_sd": args.onset_sd, "offset_sd": args.offset_sd,
                           "min_duration_s": args.min_duration_s,
                           "fp_max": args.fp_max,
                           "baseline_window_s": args.baseline_window_s,
@@ -598,8 +889,16 @@ def main(argv=None) -> int:
                             "bg_clip", "scalebar_um", "dpi", "style",
                             "rcparams")},
             "cmap_vmax_used": round(float(vmax), 4),
-            "auc_per_min_mean_by_run": [round(float(v), 4)
-                                        for v in by_roi_run.mean(axis=0)],
+            "auc_dff_mean_by_run": [round(float(v), 4)
+                                    for v in by_roi_run.mean(axis=0)],
+            "auc_df_mean_by_run": [round(float(v), 4)
+                                   for v in df_by_roi_run.mean(axis=0)],
+            "raw_F_mean_by_run": [round(float(v), 2) for v in rawF.mean(axis=0)],
+            "raw_F0_mean_by_run": [round(float(v), 2) for v in rawF0.mean(axis=0)],
+            "raw_Fneu_mean_by_run": [round(float(v), 2)
+                                     for v in rawFneu.mean(axis=0)],
+            "nu_median_by_run": [round(float(v), 3)
+                                 for v in np.median(nu_run, axis=0)],
             "note": "AUC/min is the cumulative area under dF/F of statistically "
                     "significant transients divided by epoch duration, after "
                     "Magnus et al. 2019. Negative-going deflections provide the "
