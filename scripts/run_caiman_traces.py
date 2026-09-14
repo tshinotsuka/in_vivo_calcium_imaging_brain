@@ -227,7 +227,35 @@ def main(argv=None) -> int:
                 segs.append((r["source_file"], int(r["frame_start"]),
                              int(r["frame_end"]) + 1))
 
-    # --- inferred rate per acquisition -------------------------------------
+    # --- per ROI and per acquisition ---------------------------------------
+    # The denoised trace is already a model fit, so running the event detector
+    # over it would set its threshold from a noise level the model removed.
+    # Integrating the fitted trace directly gives the same quantity in the same
+    # units as the event-based AUC, without a second thresholding step.
+    if segs:
+        out_root = args.out.expanduser().resolve()
+        with open(out_root / "auc_per_roi_per_run.csv", "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["roi", "run", "file", "auc_per_min_dff",
+                        "auc_per_min_df", "spike_rate_per_min", "n_events",
+                        "duration_min", "raw_F", "raw_F0", "resid_sd"])
+            for k, (name, a, b) in enumerate(segs, start=1):
+                dur_min = (b - a) / fs / 60.0
+                for i in range(n_roi):
+                    auc_dff = float(C[i, a:b].sum()) / fs / dur_min
+                    auc_df = float((C[i, a:b] / 100.0
+                                    * F0[i, a:b]).sum()) / fs / dur_min
+                    rate = float(S[i, a:b].sum()) / dur_min
+                    n_ev = int((S[i, a:b] > 0).sum())
+                    w.writerow([i + 1, k, name, round(auc_dff, 4),
+                                round(auc_df, 4), round(rate, 4), n_ev,
+                                round(dur_min, 3),
+                                round(float(F[i, a:b].mean()), 2),
+                                round(float(np.median(F0[i, a:b])), 2),
+                                round(float(np.std(dff[i, a:b] - C[i, a:b])), 3)])
+        print(f"\nwrote auc_per_roi_per_run.csv "
+              f"({n_roi} ROIs x {len(segs)} acquisitions)")
+
     if segs:
         print(f"\n{'run':>3} {'file':38s} {'inferred rate':>14} {'s.e.m.':>8}")
         srows = []
@@ -259,13 +287,14 @@ def main(argv=None) -> int:
                            "estimate; the transient shape comes from the model."},
                   fh, indent=2, default=str)
     print(f"\nwrote {out_plane}")
-    print("run the usual analysis against it:")
-    print(f"  python run_event_auc.py --s2p-dir {out_plane} "
-          f"--dataset <dataset> \\\n      --ledger "
-          f"{args.out.expanduser().resolve() / 'frame_ledger.csv'} "
-          "--all-roi --neucoeff 0 --smooth none --out <out>")
-    print("  (--smooth none: the traces are already smooth, so filtering them "
-          "again would\n   understate the noise the threshold is set from)")
+    print("\nplot it alongside the other variants:")
+    print(f"  python fig_auc_lines.py --csv "
+          f"{args.out.expanduser().resolve() / 'auc_per_roi_per_run.csv'} "
+          "--out <out>")
+    print("\nDo not put these traces through the event detector. It sets its "
+          "threshold from\nthe frame-to-frame spread, which a deconvolved "
+          "trace does not have: the fit is\nzero for most frames, the spread "
+          "reads as zero, and every frame becomes an event.")
     return 0
 
 
