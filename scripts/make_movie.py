@@ -80,6 +80,175 @@ def roi_outline_mask(stat, shape, crop):
     return out
 
 
+def compare_movies(args, cv2):
+    """Play several versions of one recording side by side, in step.
+
+    The point of the comparison is what a denoiser did to the images, and that
+    is only visible if the versions are shown at the same moment on the same
+    intensity scale. Scaling each tile separately would hide a change in
+    absolute brightness, which is one of the things a denoiser can do without
+    announcing it.
+    """
+    import tifffile
+
+    labels = args.compare_labels or [m.stem for m in args.compare]
+    if len(labels) != len(args.compare):
+        print("ERROR: --compare-labels must match --compare", file=sys.stderr)
+        return 2
+
+    ops, stat = {}, None
+    if args.s2p_dir:
+        plane = args.s2p_dir.expanduser().resolve()
+        for cand in ("reg_outputs.npy", "detect_outputs.npy", "ops.npy", "db.npy"):
+            f = plane / cand
+            if f.exists():
+                ops.update(np.load(f, allow_pickle=True).item())
+        if args.rois and (plane / "stat.npy").exists():
+            stat = np.load(plane / "stat.npy", allow_pickle=True)
+            ic = np.load(plane / "iscell.npy")
+            if not args.all_roi:
+                stat = stat[ic[:, 0].astype(bool)]
+
+    movs, shapes = [], set()
+    for m in args.compare:
+        mm = tifffile.memmap(str(m)) if m.suffix.lower() in (".tif", ".tiff") \
+            else None
+        if mm is None:
+            print(f"ERROR: {m} is not a TIFF", file=sys.stderr)
+            return 2
+        movs.append(mm)
+        shapes.add(mm.shape)
+        print(f"  {m.name:44s} {mm.shape} {mm.dtype}")
+    if len(shapes) > 1:
+        print(f"ERROR: the movies differ in shape: {shapes}", file=sys.stderr)
+        return 2
+    n_t, ny, nx = movs[0].shape
+
+    a, b = args.frames if args.frames else (0, n_t)
+    a, b = max(0, a), min(n_t, b)
+    ds = max(int(args.downsample), 1)
+    n_out = (b - a) // ds
+
+    fs = args.fs
+    if fs is None and args.dataset:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        try:
+            from run_roi_suite2p import resolve_from_metadata
+            fs = resolve_from_metadata(
+                args.dataset.expanduser().resolve() / "raw" / "metadata.yaml"
+            ).get("fs_hz")
+        except Exception as e:  # noqa: BLE001
+            print(f"metadata unreadable: {e}", file=sys.stderr)
+    if fs is None:
+        print("ERROR: pass --fs or --dataset", file=sys.stderr)
+        return 2
+
+    # intensity range
+    idx = np.linspace(a, b - 1, min(200, b - a), dtype=int)
+    ranges = []
+    for mm in movs:
+        smp = np.asarray(mm[idx], np.float32)
+        ranges.append((float(np.percentile(smp, args.clip[0])),
+                       float(np.percentile(smp, args.clip[1]))))
+    if args.per_movie_scale:
+        print("\nper-tile intensity ranges: "
+              + ", ".join(f"{l} [{lo:.0f}, {hi:.0f}]"
+                          for l, (lo, hi) in zip(labels, ranges)))
+    else:
+        lo = min(r[0] for r in ranges)
+        hi = max(r[1] for r in ranges)
+        ranges = [(lo, hi)] * len(movs)
+        print(f"\nshared intensity range [{lo:.0f}, {hi:.0f}] for every tile")
+
+    # ROI outlines, shifted if the movies are the cropped valid region
+    edges = None
+    if stat is not None:
+        off = (0, 0)
+        if ops.get("Ly") and (ny, nx) != (int(ops["Ly"]), int(ops["Lx"])) \
+                and ops.get("yrange") is not None:
+            off = (int(ops["yrange"][0]), int(ops["xrange"][0]))
+            print(f"ROI coordinates shifted by {off} to match the cropped movies")
+        edges = np.zeros((ny, nx), bool)
+        for s_ in stat:
+            m = np.zeros((ny, nx), bool)
+            yy = np.asarray(s_["ypix"]) - off[0]
+            xx = np.asarray(s_["xpix"]) - off[1]
+            k = (yy >= 0) & (yy < ny) & (xx >= 0) & (xx < nx)
+            m[yy[k], xx[k]] = True
+            inner = (np.roll(m, 1, 0) & np.roll(m, -1, 0)
+                     & np.roll(m, 1, 1) & np.roll(m, -1, 1))
+            edges |= m & ~inner
+        print(f"outlining {len(stat)} ROI(s) on every tile")
+
+    lut = None
+    if args.cmap:
+        import matplotlib.cm as cm
+        lut = (np.asarray(cm.get_cmap(args.cmap)(np.linspace(0, 1, 256)))[:, :3]
+               * 255).astype(np.uint8)[:, ::-1]
+
+    cols = max(1, min(args.grid_cols, len(movs)))
+    rows = int(np.ceil(len(movs) / cols))
+    tw, th = nx * args.scale, ny * args.scale
+    lab_h = 0 if args.no_overlay else max(int(0.10 * th), 20)
+    foot = 0 if args.no_overlay else max(int(0.06 * th), 16)
+    gw, gh = cols * tw, rows * (th + lab_h) + foot
+    fsc = max(lab_h * 0.030, 0.35) if lab_h else 0.4
+
+    fps_out = args.fps_out or min(fs * args.speed / ds, 60.0)
+    eff = fps_out * ds / fs
+    out = args.out.expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    vw = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*args.codec),
+                         fps_out, (gw, gh), isColor=True)
+    if not vw.isOpened():
+        print(f"ERROR: could not open {out} with codec {args.codec}",
+              file=sys.stderr)
+        return 2
+    print(f"\nwriting {n_out} frames at {fps_out:.1f} fps ({eff:.0f}x), "
+          f"{gw} x {gh} px -> {out.name}")
+
+    rc, gc, bc = args.roi_color
+    for k in range(n_out):
+        s0 = a + k * ds
+        canvas = np.zeros((gh, gw, 3), np.uint8)
+        for j, (mm, (lo, hi), lab) in enumerate(zip(movs, ranges, labels)):
+            chunk = np.asarray(mm[s0:s0 + ds], np.float32)
+            img = chunk.mean(axis=0) if ds > 1 else chunk[0]
+            v = np.clip((img - lo) / max(hi - lo, 1e-9), 0, 1)
+            g8 = (v * 255).astype(np.uint8)
+            fr = (lut[g8] if lut is not None
+                  else np.repeat(g8[:, :, None], 3, axis=2))
+            if edges is not None:
+                fr[edges] = (bc, gc, rc)
+            fr = cv2.resize(fr, (tw, th), interpolation=cv2.INTER_NEAREST)
+            r, c = divmod(j, cols)
+            yo_ = r * (th + lab_h)
+            canvas[yo_:yo_ + th, c * tw:(c + 1) * tw] = fr
+            if lab_h:
+                cv2.putText(canvas, lab[:22], (c * tw + 6,
+                                               yo_ + th + int(lab_h * 0.74)),
+                            cv2.FONT_HERSHEY_SIMPLEX, fsc, (255, 255, 255), 1,
+                            cv2.LINE_AA)
+        if foot:
+            t = s0 / fs
+            scale_txt = ("per-tile scale" if args.per_movie_scale
+                         else "shared intensity scale")
+            cv2.putText(canvas, f"{int(t // 60):02d}:{t % 60:04.1f}    "
+                                f"{eff:.0f}x    {scale_txt}",
+                        (8, gh - int(foot * 0.28)), cv2.FONT_HERSHEY_SIMPLEX,
+                        fsc * 0.9, (190, 190, 190), 1, cv2.LINE_AA)
+        vw.write(canvas)
+        if n_out >= 20 and k % max(n_out // 10, 1) == 0:
+            print(f"  {k / n_out * 100:3.0f}%", end="\r", flush=True)
+    vw.release()
+    print(f"\nwrote {out}  ({out.stat().st_size / 1e6:.1f} MB)")
+    if not args.per_movie_scale:
+        print("  Every tile is on the same scale, so a tile that looks "
+              "brighter is brighter\n  and a cell that leaves its outline has "
+              "moved in that version.")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description="export the registered movie as AVI",
@@ -116,6 +285,17 @@ def main(argv=None) -> int:
     p.add_argument("--codec", default="MJPG",
                    help="FourCC; MJPG is widely playable, XVID is smaller")
     p.add_argument("--chan2", action="store_true")
+    p.add_argument("--compare", type=Path, nargs="+", default=None,
+                   metavar="MOVIE",
+                   help="tile several versions of the same recording side by "
+                        "side, played in step. Use with --s2p-dir so the ROI "
+                        "outlines and the valid region come from the detection "
+                        "run that all of them share")
+    p.add_argument("--compare-labels", nargs="*", default=None)
+    p.add_argument("--per-movie-scale", action="store_true",
+                   help="scale each tile to its own range. Off by default: a "
+                        "denoiser that changes absolute brightness should look "
+                        "like it changed absolute brightness")
     p.add_argument("--per-run", action="store_true",
                    help="also write one AVI per acquisition, alongside the "
                         "combined view")
@@ -134,6 +314,9 @@ def main(argv=None) -> int:
         print("ERROR: opencv is required. pip install opencv-python-headless",
               file=sys.stderr)
         return 2
+
+    if args.compare:
+        return compare_movies(args, cv2)
 
     # --- source ------------------------------------------------------------
     ops: dict = {}
