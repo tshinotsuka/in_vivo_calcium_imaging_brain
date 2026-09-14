@@ -510,6 +510,13 @@ def main(argv=None) -> int:
     p.add_argument("--n-example-traces", type=int, default=12)
     p.add_argument("--bit-max", type=int, default=32767, help="detector full scale in raw units")
     p.add_argument("--all-roi", action="store_true", help="use every ROI, not only iscell-accepted ones")
+    p.add_argument("--tau-tolerance", type=float, default=4.0,
+                   help="how many indicator decay times the autocorrelation may "
+                        "span before the dominant fluctuation is too slow to be "
+                        "a calcium transient")
+    p.add_argument("--min-skew", type=float, default=1.0,
+                   help="minimum median skewness; calcium traces rise above "
+                        "baseline and fall back, so they are positively skewed")
     p.add_argument("--img-clip", type=float, nargs=2, default=[1.0, 99.5],
                    metavar=("LO_PCT", "HI_PCT"),
                    help="display percentiles for the mean image; widen to see dim cells")
@@ -588,11 +595,28 @@ def main(argv=None) -> int:
         f"{sr['frac_roi_skew_above_surrogate_p99']*100:.0f}% of ROIs exceed the "
         f"phase-randomised 99th pct (skew {sr['median_skew']:.2f} vs {sr['median_skew_surrogate']:.2f})",
     ))
+    # The timescale has to sit between two bounds, not merely above one.
+    # Anything as fast as a single frame is noise; anything far slower than the
+    # indicator's own decay is not a calcium transient either, whatever else it
+    # may be. A lower bound alone passes slow baseline wander, which is exactly
+    # what a detector built for fast transients will then fail to find.
+    _ac = sr["median_autocorr_halfwidth_s"]
+    _hi = args.tau * args.tau_tolerance
     checks.append((
         "temporal structure",
-        sr["median_autocorr_halfwidth_s"] > 3.0 / args.fs,
-        f"autocorr half-width {sr['median_autocorr_halfwidth_s']:.2f}s "
-        f"(one frame {sr['one_frame_s']:.3f}s, indicator {args.tau:g}s)",
+        (_ac > 3.0 / args.fs) and (_ac <= _hi),
+        f"autocorr half-width {_ac:.2f}s; expected between "
+        f"{3.0 / args.fs:.2f}s (one frame) and {_hi:.2f}s "
+        f"({args.tau_tolerance:g}x the {args.tau:g}s indicator decay)"
+        + ("" if _ac <= _hi else
+           f" -- {_ac / args.tau:.0f}x the indicator, so the dominant "
+           "fluctuation is not a calcium transient"),
+    ))
+    checks.append((
+        "transient shape",
+        sr["median_skew"] >= args.min_skew,
+        f"median skewness {sr['median_skew']:.2f}, expected at least "
+        f"{args.min_skew:g} for traces dominated by rise-and-decay transients",
     ))
     tr = res["transients"]
     checks.append((
