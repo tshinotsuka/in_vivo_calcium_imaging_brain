@@ -236,7 +236,14 @@ def detect_events(d_pct: np.ndarray, fs: float, *, df_raw: np.ndarray | None = N
     kept_bins, rates = set(), {}
     cum_thresh = None
 
-    if fp_method == "cumulative":
+    if fp_method == "none":
+        # Every excursion above the onset threshold is kept. The per-ROI test
+        # below remains the control, which is the right place for it when the
+        # question is whether a given cell was active rather than which
+        # individual excursions were real.
+        kept_bins = set(pb.keys())
+        rates = {k: float("nan") for k in pb}
+    elif fp_method == "cumulative":
         # With few events a per-bin ratio is unstable: a bin holding one
         # positive and one negative reads as a 100% false-positive rate and is
         # discarded, while a bin holding one positive and none reads as 0% and
@@ -331,6 +338,11 @@ def detect_events(d_pct: np.ndarray, fs: float, *, df_raw: np.ndarray | None = N
         "n_roi_rejected": len(rejected_rois),
         "cumulative_amplitude_threshold_sd": (None if cum_thresh is None
                                               else round(cum_thresh, 3)),
+        "min_duration_s": min_dur_s,
+        "n_rejected_short": int(sum(1 for e in pos_all if e[4] < min_dur_s)),
+        "n_rejected_fp": int(len(pos_all)
+                             - sum(1 for e in pos_all if e[4] < min_dur_s)
+                             - len(kept_raw)),
         "false_positive_rates": {f"{k[0]}_{k[1]}": round(v, 4)
                                  for k, v in sorted(rates.items())},
     }
@@ -371,6 +383,96 @@ def apply_style():
         return None
 
 
+def tune_figure(d, fs, args, out, segs):
+    """Show every candidate excursion and the reason it was or was not counted.
+
+    Detection has three ways to discard a candidate, and from the final figure
+    they are indistinguishable: a peak simply is not shaded. Seeing which rule
+    removed it is what tells you which parameter to change, rather than
+    guessing between the onset threshold, the minimum duration and the
+    false-positive test.
+    """
+    n_roi = d.shape[0]
+    sd0 = robust_sd(d)
+    allc = []
+    for i in range(n_roi):
+        s_ = float(max(sd0[i], 1e-9))
+        base = float(np.median(d[i]))
+        tr = d[i] - base
+        for a, b in _scan(tr, s_, args.onset_sd, args.offset_sd, +1):
+            allc.append((i, a, b, float(tr[a:b].max()) / s_, (b - a) / fs))
+
+    events, _, st = detect_events(
+        d, fs, on_k=args.onset_sd, off_k=args.offset_sd,
+        min_dur_s=args.min_duration_s, fp_max=args.fp_max,
+        fp_method=args.fp_method, min_bin_count=args.min_bin_count,
+        roi_alpha=args.roi_alpha)
+    kept = {(e.roi, e.onset) for e in events}
+
+    counts = {"counted": 0, "too short": 0, "rejected": 0}
+    per_roi: dict[int, list] = {}
+    for i, a, b, amp, dur in allc:
+        if (i, a) in kept:
+            fate = "counted"
+        elif dur < args.min_duration_s:
+            fate = "too short"
+        else:
+            fate = "rejected"
+        counts[fate] += 1
+        per_roi.setdefault(i, []).append((a, b, amp, dur, fate))
+
+    sel = (np.array(args.tune, int) - 1 if args.tune else
+           np.array(sorted(per_roi, key=lambda i: -len(per_roi[i]))[:args.tune_n]))
+    sel = np.array([i for i in sel if 0 <= i < n_roi], int)
+
+    print(f"\ncandidate excursions above {args.onset_sd:g} sd: {len(allc)}")
+    for k, v in counts.items():
+        print(f"  {k:11s} {v:6d}  ({v / max(len(allc), 1) * 100:4.1f}%)")
+    print(f"  minimum duration {args.min_duration_s:.2f} s, "
+          f"fp method {args.fp_method}, roi alpha {args.roi_alpha}")
+    if st.get("cumulative_amplitude_threshold_sd") is not None:
+        thr = st["cumulative_amplitude_threshold_sd"]
+        print(f"  cumulative amplitude threshold {thr:.2f} sd "
+              f"= {thr * float(np.median(sd0)):.1f} %dF/F at the median ROI")
+
+    apply_style()
+    plt.rcParams.update({"pdf.fonttype": 42, "svg.fonttype": "none"})
+    colors = {"counted": "C2", "too short": "C1", "rejected": "C3"}
+    fig, axes = plt.subplots(sel.size, 1, figsize=(15, 2.0 * sel.size),
+                             sharex=True, squeeze=False)
+    for ax, i in zip(axes[:, 0], sel):
+        t = np.arange(d.shape[1]) / fs
+        ax.plot(t, d[i], lw=0.4, color="0.3")
+        s_ = float(max(sd0[i], 1e-9))
+        for lv, ls in ((args.onset_sd, "--"), (args.offset_sd, ":")):
+            ax.axhline(np.median(d[i]) + lv * s_, color="0.6", ls=ls, lw=0.7)
+        for a, b, amp, dur, fate in per_roi.get(i, []):
+            ax.axvspan(a / fs, b / fs, color=colors[fate], alpha=0.35, lw=0)
+        n = {k: sum(1 for x in per_roi.get(i, []) if x[4] == k) for k in colors}
+        ax.set_ylabel(f"ROI {i + 1}", fontsize=8)
+        ax.set_title(f"counted {n['counted']}   too short {n['too short']}   "
+                     f"rejected {n['rejected']}   (sd {s_:.1f} %dF/F)",
+                     fontsize=8, loc="left")
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for m0, mstart, _ in [(0, seg[1], 0) for seg in segs][1:]:
+            ax.axvline(mstart / fs, color="0.75", ls=":", lw=0.8)
+    axes[-1, 0].set_xlabel("time (s)")
+    handles = [plt.Line2D([0], [0], color=c, lw=6, alpha=0.35, label=k)
+               for k, c in colors.items()]
+    axes[0, 0].legend(handles=handles, fontsize=8, ncol=3, frameon=False,
+                      loc="upper right")
+    fig.suptitle("every excursion above the onset threshold, and its fate",
+                 fontsize=10, x=0.01, ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    out.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out / "tuning.png", dpi=180, bbox_inches="tight")
+    fig.savefig(out / "tuning.pdf", bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {out / 'tuning.png'} and .pdf")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description="event-based AUC/min per ROI per acquisition",
@@ -392,10 +494,12 @@ def main(argv=None) -> int:
                    help="time constant for --smooth exp")
     p.add_argument("--indicator-tau-s", type=float, default=0.27,
                    help="indicator decay for --smooth matched (jGCaMP8s ~0.27 s)")
-    p.add_argument("--fp-method", choices=["bin", "cumulative"], default="bin",
+    p.add_argument("--fp-method", choices=["bin", "cumulative", "none"], default="bin",
                    help="'bin' is the published amplitude-by-duration test; "
                         "'cumulative' fits one amplitude threshold to all events "
-                        "and is far better determined when events are scarce")
+                        "and is far better determined when events are scarce; "
+                        "'none' keeps every excursion above the onset threshold "
+                        "and leaves the per-ROI test as the only control")
     p.add_argument("--roi-alpha", type=float, default=0.05,
                    help="per-ROI binomial test against its own downward "
                         "excursions; 0 disables it. Protects individual ROIs, "
@@ -403,12 +507,31 @@ def main(argv=None) -> int:
     p.add_argument("--min-bin-count", type=int, default=5,
                    help="bins with fewer positives than this are pooled across "
                         "durations instead of judged on their own")
+    p.add_argument("--tune", type=int, nargs="*", default=None,
+                   metavar="ROI",
+                   help="write a diagnostic figure showing every candidate "
+                        "excursion and whether it was counted, too short, or "
+                        "rejected by the false-positive test. With no numbers, "
+                        "the ROIs with the most candidates are shown")
+    p.add_argument("--tune-n", type=int, default=6)
     p.add_argument("--sweep", action="store_true",
                    help="report detection over a grid of settings and stop, "
                         "without writing figures")
     p.add_argument("--onset-sd", type=float, default=3.0)
     p.add_argument("--offset-sd", type=float, default=0.5)
-    p.add_argument("--min-duration-s", type=float, default=0.5)
+    p.add_argument("--min-duration-s", default="auto",
+                   help="minimum event duration in seconds, or 'auto'. The "
+                        "published 0.5 s was chosen for a slower indicator at a "
+                        "higher frame rate; with jGCaMP8s at this rate an event "
+                        "that just reaches the onset threshold decays to the "
+                        "offset threshold in about that same 0.5 s, so a fixed "
+                        "0.5 s rejects precisely the marginal events and does so "
+                        "inconsistently, according to how the noise falls. "
+                        "'auto' sets it to a fraction of that decay time")
+    p.add_argument("--min-duration-frac", type=float, default=0.6,
+                   help="for --min-duration-s auto: fraction of the time an "
+                        "event at the onset threshold needs to reach the offset "
+                        "threshold")
     p.add_argument("--fp-max", type=float, default=0.05)
     p.add_argument("--all-roi", action="store_true")
     p.add_argument("--max-traces-per-page", type=int, default=25)
@@ -493,6 +616,23 @@ def main(argv=None) -> int:
     print(f"ROIs {n_roi}   frames {n_frames}   {n_frames / fs / 60:.1f} min "
           f"at {fs:.4g} Hz   {len(segs)} acquisition(s)")
 
+    if str(args.min_duration_s).lower() == "auto":
+        # An event that only just reaches the onset threshold decays to the
+        # offset threshold in tau * ln(onset/offset) seconds. A minimum
+        # duration at or above that value rejects precisely the events at the
+        # threshold, and does so according to how the noise happens to fall,
+        # which is what makes detection look inconsistent from peak to peak.
+        decay = args.indicator_tau_s * np.log(max(args.onset_sd, 1e-9)
+                                              / max(args.offset_sd, 1e-9))
+        args.min_duration_s = max(args.min_duration_frac * decay, 2.0 / fs)
+        print(f"minimum duration set to {args.min_duration_s:.2f} s "
+              f"({args.min_duration_s * fs:.1f} frames): an event at "
+              f"{args.onset_sd:g} sd decays to {args.offset_sd:g} sd in "
+              f"{decay:.2f} s ({decay * fs:.1f} frames), so anything longer "
+              f"would reject events at the threshold itself")
+    else:
+        args.min_duration_s = float(args.min_duration_s)
+
     # --- dF/F, per acquisition so a baseline never spans a boundary ---------
     Fc = F - args.neucoeff * Fneu
     F0 = np.empty_like(Fc)
@@ -533,6 +673,9 @@ def main(argv=None) -> int:
         print("\nROIs>0 is how many of "
               f"{n_roi} ROIs had at least one counted event anywhere.")
         return 0
+
+    if args.tune is not None:
+        return tune_figure(d, fs, args, out, segs)
 
     events, kept_bins, ev_stats = detect_events(
         d, fs, df_raw=df_raw, on_k=args.onset_sd, off_k=args.offset_sd,
