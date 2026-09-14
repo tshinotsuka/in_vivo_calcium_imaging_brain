@@ -53,6 +53,12 @@ def load(path: Path, value: str):
         raise KeyError(f"{path} has no column {value!r}; available: "
                        + ", ".join(rows[0]))
     rois = sorted({int(r["roi"]) for r in rows})
+    if rois and rois[0] == 0:
+        # some writers index ROIs from zero and others from one; shift so the
+        # labels mean the same thing when panels are compared
+        rois = [r + 1 for r in rois]
+        for r in rows:
+            r["roi"] = str(int(r["roi"]) + 1)
     runs = sorted({int(r["run"]) for r in rows})
     M = np.full((len(rois), len(runs)), np.nan)
     ri = {r: i for i, r in enumerate(rois)}
@@ -72,8 +78,9 @@ def main(argv=None) -> int:
     p.add_argument("--csv", type=Path, nargs="+", required=True)
     p.add_argument("--labels", nargs="*", default=None)
     p.add_argument("--out", type=Path, required=True, help="output stem")
-    p.add_argument("--value", default="auc_per_min_dff",
-                   help="column to plot")
+    p.add_argument("--value", nargs="+", default=["auc_per_min_dff"],
+                   help="column to plot. Give one name, or one per CSV when "
+                        "the panels should show different quantities")
     p.add_argument("--ylabel", default=None,
                    help="default is chosen from --value")
     p.add_argument("--xlabel", default="acquisition")
@@ -105,24 +112,35 @@ def main(argv=None) -> int:
         print("ERROR: --labels must match the number of --csv", file=sys.stderr)
         return 2
 
+    values = (args.value if len(args.value) == len(args.csv)
+              else args.value[:1] * len(args.csv))
+    if len(args.value) not in (1, len(args.csv)):
+        print("ERROR: --value must be one name, or one per --csv",
+              file=sys.stderr)
+        return 2
     mats = []
-    for c in args.csv:
+    for c, v in zip(args.csv, values):
         try:
-            mats.append(load(c.expanduser().resolve(), args.value))
+            mats.append(load(c.expanduser().resolve(), v))
         except (KeyError, ValueError) as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
 
     ylab = args.ylabel
     if ylab is None:
+        args_value = values[0]
         ylab = {
             "auc_per_min_dff": r"AUC (%$\Delta$F/F$\cdot$s / min)",
+            "auc_rolling": r"AUC, rolling F0 (mean %$\Delta$F/F)",
+            "auc_fixed":   r"AUC, fixed F0 (mean %$\Delta$F/F)",
+            "spike_rate_per_min": "inferred rate (a.u. / min)",
+            "resid_sd": r"residual s.d. (%$\Delta$F/F)",
             "auc_per_min_df":  r"$\Delta$F AUC (a.u.$\cdot$s / min)",
             "n_events": "events per acquisition",
             "nu": r"$\nu$ (%$\cdot$Hz$^{-1/2}$)",
             "raw_F": "raw F (a.u.)",
             "raw_F0": "F0 (a.u.)",
-        }.get(args.value, args.value)
+        }.get(args_value, args_value)
     if args.normalise:
         ylab += "\n(fraction of acquisition 1)"
 
@@ -145,7 +163,7 @@ def main(argv=None) -> int:
     fig, axes = plt.subplots(1, n, figsize=fs_, squeeze=False, sharey=True)
 
     summary = []
-    for ax, (M, rois, runs), lab in zip(axes[0], mats, labels):
+    for ax, (M, rois, runs), lab, val in zip(axes[0], mats, labels, values):
         if args.normalise:
             M = M / np.where(np.abs(M[:, 0:1]) > 1e-12, M[:, 0:1], np.nan)
         for i in range(M.shape[0]):
@@ -182,11 +200,13 @@ def main(argv=None) -> int:
             ax.spines[side].set_visible(False)
         chg = ((m[-1] - m[0]) / abs(m[0]) * 100) if abs(m[0]) > 1e-12 else np.nan
         n_down = int(np.sum(M[:, -1] < M[:, 0]))
-        ax.set_title(f"{lab}\nmean {m[0]:.1f} -> {m[-1]:.1f} ({chg:+.0f}%);   "
+        ax.set_title(f"{lab}"
+                     + (f"  [{val}]" if len(set(values)) > 1 else "")
+                     + f"\nmean {m[0]:.1f} -> {m[-1]:.1f} ({chg:+.0f}%);   "
                      f"{n_down} of {M.shape[0]} ROIs lower at the end",
                      fontsize=9, loc="left")
         ax.legend(fontsize=8, frameon=False)
-        summary.append({"label": lab, "n_roi": int(M.shape[0]),
+        summary.append({"label": lab, "value": val, "n_roi": int(M.shape[0]),
                         "mean_by_run": [round(float(x), 4) for x in m],
                         "sem_by_run": [round(float(x), 4)
                                        for x in (sd / np.sqrt(np.maximum(k, 1)))],
@@ -214,7 +234,7 @@ def main(argv=None) -> int:
               f"({s['pct_change_first_to_last']:+.0f}%)  "
               f"{s['n_roi_lower_at_end']}/{s['n_roi']} lower")
     with open(out.with_suffix(".json"), "w") as fh:
-        json.dump({"value": args.value, "panels": summary}, fh, indent=2)
+        json.dump({"values": values, "panels": summary}, fh, indent=2)
     print(f"\nwrote {out.with_suffix('.png')}, .pdf and .json")
     return 0
 
