@@ -67,6 +67,8 @@ def main(argv=None) -> int:
     p.add_argument("--no-background", action="store_true",
                    help="reconstruct without the background term, leaving only "
                         "the component signal")
+    p.add_argument("--no-refit", dest="refit", action="store_false",
+                   help="skip the second CNMF pass")
     p.add_argument("--n-processes", type=int, default=None)
     p.add_argument("--dtype", default="float32", choices=["float32", "int16"])
     args = p.parse_args(argv)
@@ -123,13 +125,28 @@ def main(argv=None) -> int:
             "merging": {"merge_thr": args.merge_thr},
         })
         cnm = cnmf_mod.CNMF(n_proc, params=opts, dview=dview)
-        cnm = cnm.fit(images)
+        # Some CaImAn versions return the object from fit(), others update it in
+        # place and return None. Keep whichever object actually holds estimates
+        # rather than assuming either convention.
+        res = cnm.fit(images)
+        cnm = res if getattr(res, "estimates", None) is not None else cnm
+        if getattr(cnm, "estimates", None) is None:
+            print("ERROR: CNMF produced no estimates. With K components and "
+                  "gSig too large for the\n  field, initialisation can find "
+                  "nothing; try a smaller --gSig or --K.", file=sys.stderr)
+            return 2
         print(f"  {cnm.estimates.A.shape[1]} components, "
               f"{cnm.estimates.b.shape[1]} background")
-        cnm = cnm.refit(images, dview=dview)
-        print(f"  after refit: {cnm.estimates.A.shape[1]} components")
+        if args.refit:
+            res = cnm.refit(images, dview=dview)
+            cnm = res if getattr(res, "estimates", None) is not None else cnm
+            print(f"  after refit: {cnm.estimates.A.shape[1]} components")
 
         est = cnm.estimates
+        if est.C is None or est.A is None:
+            print("ERROR: the factorisation has no components to reconstruct "
+                  "from.", file=sys.stderr)
+            return 2
         rec = est.A.dot(est.C)
         if not args.no_background:
             rec = rec + est.b.dot(est.f)
