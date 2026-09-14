@@ -87,6 +87,16 @@ def main(argv=None) -> int:
     p.add_argument("--cellprob-threshold", type=float, default=None)
     p.add_argument("--spatial-scale", type=int, default=0, choices=[0, 1, 2, 3, 4])
     p.add_argument("--threshold-scaling", type=float, default=1.0)
+    p.add_argument("--denoise", action="store_true",
+                   help="PCA-denoise the binned movie before detection "
+                        "(sparsery only). This affects which ROIs are found and "
+                        "nothing else: the extracted traces are still the raw "
+                        "weighted pixel sums, so it does not improve event "
+                        "detection downstream")
+    p.add_argument("--denoise-block-size", type=int, nargs=2, default=None,
+                   metavar=("Y", "X"))
+    p.add_argument("--nbins", type=int, default=None,
+                   help="max binned frames used for detection")
     p.add_argument("--tau", type=float, default=0.5)
     p.add_argument("--nonrigid", action="store_true",
                    help="piecewise-rigid registration (refused on a small field)")
@@ -211,6 +221,15 @@ def main(argv=None) -> int:
     det = settings.setdefault("detection", {})
     det["algorithm"] = args.algorithm
     det["threshold_scaling"] = args.threshold_scaling
+    if args.denoise:
+        if args.algorithm != "sparsery":
+            print("NOTE: denoise applies to sparsery only; ignored for "
+                  f"{args.algorithm}", file=sys.stderr)
+        det["denoise"] = True
+        if args.denoise_block_size:
+            det["block_size"] = tuple(args.denoise_block_size)
+    if args.nbins:
+        det["nbins"] = args.nbins
     if args.algorithm == "cellpose":
         cp = det.setdefault("cellpose_settings", {})
         cp["img"] = args.cellpose_img
@@ -238,7 +257,8 @@ def main(argv=None) -> int:
     print(f"\nrunning Suite2p on {args.torch_device}")
     print(f"  {len(files)} file(s), one reference, {'non-rigid' if nonrigid else 'rigid'}")
     print(f"  nchannels={nch}  functional_chan={args.functional_chan}")
-    print(f"  detection={args.algorithm}  diameter={settings.get('diameter')}")
+    print(f"  detection={args.algorithm}  diameter={settings.get('diameter')}"
+          + ("  denoise=True" if det.get("denoise") else ""))
     suite2p.run_s2p(db=db, settings=settings)
 
     # --- outputs -------------------------------------------------------------
