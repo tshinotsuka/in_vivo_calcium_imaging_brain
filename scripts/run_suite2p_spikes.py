@@ -175,6 +175,24 @@ def main(argv=None) -> int:
                 w.writerow([i + 1, k, name, round(rate, 4), round(rate, 4),
                             int((spks[i, a:b] > 0).sum()), round(dur, 3)])
 
+    # --- the non-zero frames, written as events -----------------------------
+    # OASIS returns a sparse train, so each non-zero frame is already one
+    # inferred event with an amplitude. Writing them in the same form the
+    # event-based analysis uses lets the change classification resample them
+    # exactly as it resamples detected transients, without a separate code
+    # path. They carry no duration, so that column is left at one frame.
+    nz = np.nonzero(spks)
+    with open(out_root / "events.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["roi", "onset_frame", "offset_frame", "t_onset_s",
+                    "duration_s", "peak_dff_pct", "area_pct_s"])
+        for i, t in zip(*nz):
+            v = float(spks[i, t])
+            w.writerow([int(i) + 1, int(t), int(t) + 1, round(t / fs, 3),
+                        round(1.0 / fs, 4), round(v, 4), round(v, 4)])
+    print(f"wrote events.csv: {nz[0].size} non-zero frames as events "
+          f"({nz[0].size / n_roi:.0f} per ROI)")
+
     print(f"\n{'run':>3} {'file':38s} {'rate':>10} {'s.e.m.':>8}")
     rows = []
     for k, (name, a, b) in enumerate(segs, start=1):
@@ -205,9 +223,13 @@ def main(argv=None) -> int:
                            "implement OASIS, so the two are not independent."},
                   fh, indent=2)
     print(f"\nwrote {out_plane} and auc_per_roi_per_run.csv")
-    print("plot it against the other variants:")
+    print("\nplot it against the other variants:")
     print(f"  python fig_auc_lines.py --value spike_rate_per_min --csv "
           f"{out_root / 'auc_per_roi_per_run.csv'} --out <out>")
+    print(f"  python fig_change_pie.py --auc-dir {out_root} "
+          "--value spike_rate_per_min \\")
+    print(f"      --ledger {out_root / 'frame_ledger.csv'} --to-run all "
+          "--out <out>")
     return 0
 
 

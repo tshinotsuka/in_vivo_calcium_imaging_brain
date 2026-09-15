@@ -234,6 +234,21 @@ def main(argv=None) -> int:
     # units as the event-based AUC, without a second thresholding step.
     if segs:
         out_root = args.out.expanduser().resolve()
+        # Each non-zero frame of the inferred train is one event with an
+        # amplitude, so writing them in the event format lets the change
+        # classification resample them the same way it resamples detected
+        # transients.
+        nz = np.nonzero(S)
+        with open(out_root / "events.csv", "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["roi", "onset_frame", "offset_frame", "t_onset_s",
+                        "duration_s", "peak_dff_pct", "area_pct_s"])
+            for i, t in zip(*nz):
+                v = float(S[i, t])
+                w.writerow([int(i) + 1, int(t), int(t) + 1, round(t / fs, 3),
+                            round(1.0 / fs, 4), round(v, 4), round(v, 4)])
+        print(f"wrote events.csv: {nz[0].size} non-zero frames as events")
+
         with open(out_root / "auc_per_roi_per_run.csv", "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["roi", "run", "file", "auc_per_min_dff",
