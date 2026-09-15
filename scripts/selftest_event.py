@@ -63,3 +63,44 @@ sm = E.exp_smooth(rng.normal(0,1,(3,5000)).astype(np.float32), 0.2*fs)
 assert sm.std() < 0.6
 print("PASS  exponential smoothing reduces variance")
 print("\nALL PASS")
+
+# --- 6. matched filtering in a regime where detection actually fails -------
+print("\n--- low-SNR regime (peak transient = 2.5x the per-frame noise) ---")
+
+def low_snr(seed, peak_over_noise=2.5, n_ev=15, nr=8):
+    r = np.random.default_rng(seed)
+    kern = np.exp(-np.arange(70)/(0.27*fs)); kern[0]=0; kern[:2]=np.linspace(0,1,2)
+    sigma = 10.0
+    out = np.empty((nr, n_t))
+    for i in range(nr):
+        ev = np.zeros(n_t); ev[r.choice(n_t, n_ev, replace=False)] = 1
+        sig = np.convolve(ev, kern, 'same')
+        out[i] = peak_over_noise*sigma*sig/sig.max() + r.normal(0, sigma, n_t)
+    return out.astype(np.float32), nr
+
+D, nr = low_snr(7)
+res = {}
+for lab in ('none','exp','matched'):
+    Ds = (E.exp_smooth(D, 0.2*fs) if lab=='exp'
+          else E.matched_filter(D, 0.27*fs) if lab=='matched' else D)
+    for meth in ('bin','cumulative'):
+        ev,_,st = E.detect_events(Ds, fs, min_dur_s=0.5, fp_method=meth)
+        a = E.auc_per_min(ev, nr, 0, n_t, fs)
+        res[(lab,meth)] = st['n_events_kept']
+        print(f"  {lab:8s} {meth:11s} events {st['n_events_kept']:4d}/{nr*15}  "
+              f"ROIs>0 {int((a>0).sum()):2d}/{nr}  AUC {a.mean():7.1f}")
+assert res[('matched','cumulative')] > res[('none','bin')], res
+print(f"PASS  matched + cumulative finds more of the injected events "
+      f"({res[('none','bin')]} -> {res[('matched','cumulative')]} of {nr*15})")
+
+# and must not manufacture events from noise
+pure = np.random.default_rng(11).normal(0, 10.0, (nr, n_t)).astype(np.float32)
+for lab in ('none','matched'):
+    Ps = E.matched_filter(pure, 0.27*fs) if lab=='matched' else pure
+    for meth in ('bin','cumulative'):
+        ev,_,st = E.detect_events(Ps, fs, min_dur_s=0.5, fp_method=meth)
+        print(f"  pure noise {lab:8s} {meth:11s}: {st['n_events_kept']:3d} kept "
+              f"of {st['n_positive_raw']:4d} raw")
+        assert st['n_events_kept'] <= 3, (lab, meth, st['n_events_kept'])
+print("PASS  neither smoothing nor the cumulative test manufactures events")
+print("\nALL PASS")

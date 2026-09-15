@@ -139,9 +139,20 @@ class Event:
 
 
 def _scan(trace: np.ndarray, sd: float, on_k: float, off_k: float, sign: int):
-    """Find excursions that cross on_k*sd and end when they fall below off_k*sd."""
+    """Excursions that cross on_k*sd and end only once they pass off_k*sd.
+
+    The offset threshold is measured BELOW the mean, as in the published
+    method: an event begins at on_k standard deviations above the mean and does
+    not end until the trace has fallen off_k standard deviations below it. That
+    is deliberately past the baseline, so an event is not terminated by the
+    trace merely decaying back; it ends when the trace goes to the other side.
+    Reading the offset as being above the mean instead cuts every event short
+    at the point where an exponential decay is still well above baseline, which
+    shortens events, shrinks their area, and makes marginal ones fail a
+    minimum-duration test they should pass.
+    """
     x = trace * sign
-    hi, lo = on_k * sd, off_k * sd
+    hi, lo = on_k * sd, -off_k * sd
     above_hi = x > hi
     spans, i, n = [], 0, x.size
     while i < n:
@@ -518,7 +529,11 @@ def main(argv=None) -> int:
                    help="report detection over a grid of settings and stop, "
                         "without writing figures")
     p.add_argument("--onset-sd", type=float, default=3.0)
-    p.add_argument("--offset-sd", type=float, default=0.5)
+    p.add_argument("--offset-sd", type=float, default=0.5,
+                   help="offset threshold in standard deviations BELOW the "
+                        "mean, following the published method; an event ends "
+                        "only once the trace has crossed to the other side of "
+                        "baseline")
     p.add_argument("--min-duration-s", default="auto",
                    help="minimum event duration in seconds, or 'auto'. The "
                         "published 0.5 s was chosen for a slower indicator at a "
@@ -617,19 +632,15 @@ def main(argv=None) -> int:
           f"at {fs:.4g} Hz   {len(segs)} acquisition(s)")
 
     if str(args.min_duration_s).lower() == "auto":
-        # An event that only just reaches the onset threshold decays to the
-        # offset threshold in tau * ln(onset/offset) seconds. A minimum
-        # duration at or above that value rejects precisely the events at the
-        # threshold, and does so according to how the noise happens to fall,
-        # which is what makes detection look inconsistent from peak to peak.
-        decay = args.indicator_tau_s * np.log(max(args.onset_sd, 1e-9)
-                                              / max(args.offset_sd, 1e-9))
-        args.min_duration_s = max(args.min_duration_frac * decay, 2.0 / fs)
-        print(f"minimum duration set to {args.min_duration_s:.2f} s "
-              f"({args.min_duration_s * fs:.1f} frames): an event at "
-              f"{args.onset_sd:g} sd decays to {args.offset_sd:g} sd in "
-              f"{decay:.2f} s ({decay * fs:.1f} frames), so anything longer "
-              f"would reject events at the threshold itself")
+        # With the offset threshold below the mean an event does not end by
+        # decaying; it ends when noise carries the trace past baseline. Its
+        # length is therefore set by the noise, not by the indicator, and the
+        # published 0.5 s is the sensible default rather than something to
+        # derive. 'auto' keeps it unless the frame rate makes 0.5 s fewer than
+        # four frames, where a duration bin holds too little to be meaningful.
+        args.min_duration_s = max(0.5, 4.0 / fs)
+        print(f"minimum duration {args.min_duration_s:.2f} s "
+              f"({args.min_duration_s * fs:.1f} frames), as published")
     else:
         args.min_duration_s = float(args.min_duration_s)
 
