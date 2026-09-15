@@ -56,13 +56,39 @@ except ImportError:
     FILE_RE = None
 
 
+# Acquisitions that belong before the others, whatever their run numbers say.
+# A baseline recorded first is the reference every later acquisition is compared
+# against, so it has to sit at the start of the series; the ordering cannot be
+# left to the file names alone.
+_COND_ORDER = {"baseline": 0, "pre": 0, "ctrl": 0, "control": 0}
+
+
 def order_key(p: Path):
+    """Sort by condition, then run number, then acquisition number.
+
+    Sorting by the trailing acquisition number alone reorders a series whenever
+    a run was restarted: a run-01 retaken as _00003 lands after run-05's
+    _00001, and the time course silently comes out shuffled. The run number is
+    what carries the order, and the condition comes before it so a baseline
+    stays first.
+    """
+    name = p.name
+    cond = re.search(r"_cond-([^_]+)", name)
+    run = re.search(r"_run-(\d+)", name)
+    idx = None
     if FILE_RE is not None:
-        m = FILE_RE.match(p.name)
+        m = FILE_RE.match(name)
         if m:
-            return (int(m.group("idx")), p.name)
-    nums = re.findall(r"(\d+)", p.stem)
-    return (int(nums[-1]) if nums else 10**9, p.name)
+            try:
+                idx = int(m.group("idx"))
+            except (IndexError, TypeError, ValueError):
+                idx = None
+    if idx is None:
+        nums = re.findall(r"(\d+)", p.stem)
+        idx = int(nums[-1]) if nums else 10**9
+    c = cond.group(1) if cond else ""
+    return (_COND_ORDER.get(c, 1), c, int(run.group(1)) if run else 10**9,
+            idx, name)
 
 
 def main(argv=None) -> int:
@@ -148,6 +174,10 @@ def main(argv=None) -> int:
     # --- inputs and expected frame count ------------------------------------
     import tifffile
     ledger, total, shapes = [], 0, set()
+    conds = [re.search(r"_cond-([^_]+)", f.name) for f in files]
+    conds = [c.group(1) if c else "?" for c in conds]
+    if len(set(conds)) > 1:
+        print("\nconditions in order: " + " -> ".join(dict.fromkeys(conds)))
     print(f"\ninputs from {raw}")
     for f in files:
         with tifffile.TiffFile(f) as tf:
