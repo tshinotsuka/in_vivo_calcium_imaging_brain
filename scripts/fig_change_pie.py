@@ -223,6 +223,8 @@ def main(argv=None) -> int:
     p.add_argument("--color-down", default="#d95f02")
     p.add_argument("--label", default=None, help="title for the panels")
     p.add_argument("--log-scatter", action="store_true")
+    p.add_argument("--point-size", type=float, default=42.0,
+                   help="marker area in points squared")
     p.add_argument("--dpi", type=int, default=200)
     args = p.parse_args(argv)
 
@@ -414,14 +416,32 @@ def main(argv=None) -> int:
 
     colour = np.where(up, args.color_up,
                       np.where(down, args.color_down, args.color_same))
-    ax[1].scatter(v_from, v_to, s=42, c=colour, edgecolor="0.3", linewidth=0.5,
-                  zorder=3)
-    lim = [0, float(np.nanmax([v_from.max(), v_to.max()])) * 1.08]
+
+    # Pad the axes so no marker is clipped by a spine. A point sitting exactly
+    # on zero would otherwise be drawn as a half circle, which reads as a
+    # different symbol rather than as the same point at a lower value, and the
+    # marker radius is in points while the data are not, so the padding has to
+    # be worked out from the figure size rather than guessed.
     if args.log_scatter:
         pos = np.concatenate([v_from[v_from > 0], v_to[v_to > 0]])
-        lim = [pos.min() * 0.7, pos.max() * 1.4] if pos.size else [1e-3, 1]
+        base = [pos.min(), pos.max()] if pos.size else [1e-3, 1.0]
         ax[1].set_xscale("log")
         ax[1].set_yscale("log")
+        span = np.log10(base[1] / max(base[0], 1e-12))
+        pad = max(span * 0.08, 0.05)
+        lim = [base[0] * 10 ** (-pad), base[1] * 10 ** pad]
+    else:
+        vmax = float(np.nanmax([np.nanmax(v_from), np.nanmax(v_to)]))
+        vmin = float(np.nanmin([np.nanmin(v_from), np.nanmin(v_to), 0.0]))
+        rng_ = max(vmax - vmin, 1e-9)
+        # half the marker width, converted from points to data units, plus a
+        # little room for the ROI labels
+        ax_w_in = fig.get_size_inches()[0] * 0.55
+        half_marker_frac = (np.sqrt(args.point_size) / 2 + 1.5) / (ax_w_in * 72)
+        pad = rng_ * max(half_marker_frac, 0.03)
+        lim = [vmin - pad, vmax + pad]
+    ax[1].scatter(v_from, v_to, s=args.point_size, c=colour, edgecolor="0.3",
+                  linewidth=0.5, zorder=3, clip_on=False)
     if ci_lo is not None:
         o = np.argsort(v_from)
         ax[1].fill_between(v_from[o], ci_lo[o], ci_hi[o], color="0.85",
