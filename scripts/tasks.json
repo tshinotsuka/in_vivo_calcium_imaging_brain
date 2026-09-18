@@ -1,9 +1,9 @@
 {
   "version": "2.0.0",
   "options": {
+    "cwd": "${workspaceFolder}",
     "env": {
-      "D": "/media/tshino/DATA/workspace/2026_aqp4ko_water_intoxication/2photon/20260803_sub-sk28_ses-01",
-      "SUB": "sk28",
+      "WS": "/media/tshino/DATA/workspace/2026_aqp4ko_water_intoxication/2photon",
       "IVWIB_REPO": "/media/tshino/DATA/Projects/in_vivo_water_imaging_brain"
     }
   },
@@ -12,52 +12,98 @@
     "panel": "dedicated",
     "clear": true
   },
+  "inputs": [
+    {
+      "id": "dataset",
+      "type": "pickString",
+      "description": "dataset",
+      "options": [
+        "20260917_sub-sk29_ses-01",
+        "20260918_sub-sk53_ses-01",
+        "20260918_sub-sk55_ses-02",
+        "20260911_sub-sk52_ses-01",
+        "20260803_sub-sk28_ses-01"
+      ],
+      "default": "20260918_sub-sk53_ses-01"
+    },
+    {
+      "id": "batch",
+      "type": "promptString",
+      "description": "datasets: a --date, a --glob, or --all",
+      "default": "-d 20260917_sub-sk29_ses-01 -d 20260918_sub-sk53_ses-01 -d 20260918_sub-sk55_ses-02"
+    },
+    {
+      "id": "rois",
+      "type": "promptString",
+      "description": "representative ROIs, space separated (blank = automatic)",
+      "default": ""
+    }
+  ],
   "tasks": [
     {
-      "label": "0 | metadata (ivwib)",
+      "label": "0 | dry-run, batch",
       "type": "shell",
-      "command": "conda run -n ivwib --no-capture-output python ${env:IVWIB_REPO}/scripts/generate_metadata.py ${env:D}/",
+      "command": "bash scripts/ops/run_pipeline.sh ${input:batch} -s all -n",
       "problemMatcher": []
     },
     {
-      "label": "1 | suite2p series (dry-run)",
+      "label": "1 | BATCH standard run (meta..figs)",
       "type": "shell",
-      "command": "conda run -n caimg --no-capture-output python run_suite2p_series.py --dataset ${env:D} --pattern 'sub-${env:SUB}_ses-01_cond-*_run-*.tif' --functional-chan 1 --dry-run",
+      "command": "bash scripts/ops/run_pipeline.sh ${input:batch}",
       "problemMatcher": []
     },
     {
-      "label": "2 | suite2p series (register + detect, ONE run)",
+      "label": "2 | BATCH spike rate",
       "type": "shell",
-      "command": "conda run -n caimg --no-capture-output python run_suite2p_series.py --dataset ${env:D} --pattern 'sub-${env:SUB}_ses-01_cond-*_run-*.tif' --functional-chan 1 --torch-device cuda --algorithm cellpose --cellpose-img meanImg",
+      "command": "bash scripts/ops/run_pipeline.sh ${input:batch} -s spikes",
       "problemMatcher": []
     },
     {
-      "label": "3 | feasibility QC",
+      "label": "3 | BATCH figures only",
       "type": "shell",
-      "command": "conda run -n caimg --no-capture-output python qc_feasibility.py --s2p-dir ${env:D}/work/s2p_series/suite2p/plane0 --dataset ${env:D} --out ${env:D}/work/qc_series",
+      "command": "bash scripts/ops/run_pipeline.sh ${input:batch} -s figs",
       "problemMatcher": []
     },
     {
-      "label": "4 | AUC",
+      "label": "4 | BATCH denoisers, slow",
       "type": "shell",
-      "command": "conda run -n caimg --no-capture-output python run_auc.py --s2p-dir ${env:D}/work/s2p_series/suite2p/plane0 --dataset ${env:D} --ledger ${env:D}/work/s2p_series/frame_ledger.csv --out ${env:D}/work/auc",
+      "command": "bash scripts/ops/run_pipeline.sh ${input:batch} -s cnmf,deepcad,foopsi,compare",
       "problemMatcher": []
     },
     {
-      "label": "5 | ROI traces figure",
+      "label": "5 | BATCH everything",
       "type": "shell",
-      "command": "conda run -n caimg --no-capture-output python fig_roi_traces.py --s2p-dir ${env:D}/work/s2p_series/suite2p/plane0 --dataset ${env:D} --all --per-page 10 --order position --out ${env:D}/work/fig_roi_traces",
+      "command": "bash scripts/ops/run_pipeline.sh ${input:batch} -s all",
       "problemMatcher": []
     },
     {
-      "label": "run all (1-5)",
-      "dependsOrder": "sequence",
-      "dependsOn": [
-        "2 | suite2p series (register + detect, ONE run)",
-        "3 | feasibility QC",
-        "4 | AUC",
-        "5 | ROI traces figure"
-      ],
+      "label": "6 | one dataset: standard run",
+      "type": "shell",
+      "command": "bash scripts/ops/run_pipeline.sh -d \"${env:WS}/${input:dataset}\"",
+      "problemMatcher": []
+    },
+    {
+      "label": "7 | one dataset: representative traces",
+      "type": "shell",
+      "command": "bash scripts/ops/run_pipeline.sh -d \"${env:WS}/${input:dataset}\" -s figs --roi \"${input:rois}\"",
+      "problemMatcher": []
+    },
+    {
+      "label": "8 | one dataset: movie",
+      "type": "shell",
+      "command": "bash scripts/ops/run_pipeline.sh -d \"${env:WS}/${input:dataset}\" -s movie",
+      "problemMatcher": []
+    },
+    {
+      "label": "9 | pull from NAS",
+      "type": "shell",
+      "command": "unset DSTS; \"${env:IVWIB_REPO}/scripts/ops/pull_to_syrah.sh\" -p 2026_aqp4ko_water_intoxication -m 2photon -d \"${input:dataset}\" --verify",
+      "problemMatcher": []
+    },
+    {
+      "label": "10 | push results to NAS",
+      "type": "shell",
+      "command": "\"${env:IVWIB_REPO}/scripts/ops/push_results_to_nas.sh\" -p 2026_aqp4ko_water_intoxication -m 2photon -d \"${input:dataset}\" --verify",
       "problemMatcher": []
     }
   ]
