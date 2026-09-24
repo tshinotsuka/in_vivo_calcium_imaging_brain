@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ivcalc"
+version = "0.2.0"
+description = "In vivo calcium imaging analysis (Suite2p series pipeline)"
+requires-python = ">=3.11"
+dependencies = ["numpy", "scipy", "pyyaml", "tifffile", "matplotlib"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pyflakes"]
+s2p = ["suite2p"]
+movie = ["opencv-python-headless"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

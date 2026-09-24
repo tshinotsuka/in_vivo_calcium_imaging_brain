@@ -34,8 +34,14 @@ set -uo pipefail
 IVWIB="${IVWIB_REPO:-/media/tshino/DATA/Projects/in_vivo_water_imaging_brain}"
 WS="${WS:-/media/tshino/DATA/workspace/2026_aqp4ko_water_intoxication/2photon}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(dirname "$HERE")"
+# Ask git where the repository root is rather than counting directories up from
+# the script: a dirname chain silently breaks the moment the script is moved,
+# which is exactly how it broke.
+REPO="$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$REPO" ] || REPO="$(cd "$HERE/../.." && pwd)"
 SCRIPTS="$REPO/scripts"
+[ -f "$SCRIPTS/run_event_auc.py" ] || {
+  echo "ERROR: no scripts/ at $SCRIPTS (resolved from $HERE)" >&2; exit 2; }
 
 ENV_META="${ENV_META:-ivwib}"
 ENV_S2P="${ENV_S2P:-caimg}"
