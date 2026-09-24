@@ -184,6 +184,8 @@ def main(argv=None) -> int:
             return 2
         how = f"{len(sel)} ROI(s) chosen by hand"
     else:
+        sel = np.array([], int)
+        how = ""
         if vals and len(segs) > 1:
             first, last = 1, len(segs)
             ratio = np.array([
@@ -192,12 +194,24 @@ def main(argv=None) -> int:
                 if vals.get((i + 1, first), 0) else np.nan
                 for i in range(n_roi)])
             ok = np.isfinite(ratio)
-            med = np.nanmedian(ratio[ok]) if ok.any() else np.nan
-            order = np.argsort(np.abs(ratio - med))
-            sel = np.array([i for i in order if ok[i]][:args.n_auto], int)
-            how = (f"{sel.size} ROI(s) nearest the median change "
-                   f"(x{med:.2f} from acquisition {first} to {last})")
-        else:
+            if ok.any():
+                med = float(np.nanmedian(ratio[ok]))
+                order = np.argsort(np.abs(ratio - med))
+                sel = np.array([i for i in order if ok[i]][:args.n_auto], int)
+                how = (f"{sel.size} ROI(s) nearest the median change "
+                       f"(x{med:.2f} from acquisition {first} to {last})")
+        if sel.size == 0 and vals:
+            # No ROI has a ratio to be typical of, which happens when the first
+            # acquisition detected nothing: every denominator is zero. Fall
+            # back to the most active cells over the whole recording and say
+            # that is what these are, rather than implying they are typical.
+            total = np.array([sum(v for (i2, _), v in vals.items() if i2 == i + 1)
+                              for i in range(n_roi)])
+            sel = np.argsort(-total)[:args.n_auto]
+            sel = np.array([i for i in sel if total[i] > 0], int)
+            how = (f"{sel.size} most active ROI(s); no ROI had a ratio to be "
+                   "typical of, because the first acquisition detected nothing")
+        if sel.size == 0:
             sel = np.arange(min(args.n_auto, n_roi))
             how = f"first {sel.size} ROI(s); no summary given to choose from"
     print(how)
@@ -303,9 +317,9 @@ def main(argv=None) -> int:
         if vals:
             vv = [vals.get((i + 1, k2 + 1)) for k2 in range(len(segs))]
             vv = [x for x in vv if x is not None]
-            if len(vv) >= 2:
+            if len(vv) >= 2 and not np.allclose(vv, 0):
                 lab += f"   {vv[0]:.0f} to {vv[-1]:.0f}"
-            elif vv:
+            elif vv and not np.allclose(vv, 0):
                 lab += f"   {vv[0]:.0f}"
         ax_tr.text(0, off_y + step * 0.42, lab, fontsize=8, color=colors[k],
                    fontweight="bold", va="bottom")

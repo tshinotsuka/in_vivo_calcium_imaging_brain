@@ -198,11 +198,16 @@ def main(argv=None) -> int:
             ax.set_yscale("log")
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
+        # A relative change needs a starting value to be relative to. When the
+        # first acquisition is zero -- no events detected in the baseline --
+        # there is no percentage to report, and saying so is the answer rather
+        # than an error.
         chg = ((m[-1] - m[0]) / abs(m[0]) * 100) if abs(m[0]) > 1e-12 else np.nan
+        chg_txt = f"({chg:+.0f}%)" if np.isfinite(chg) else "(no baseline to compare against)"
         n_down = int(np.sum(M[:, -1] < M[:, 0]))
         ax.set_title(f"{lab}"
                      + (f"  [{val}]" if len(set(values)) > 1 else "")
-                     + f"\nmean {m[0]:.1f} -> {m[-1]:.1f} ({chg:+.0f}%);   "
+                     + f"\nmean {m[0]:.1f} -> {m[-1]:.1f} {chg_txt};   "
                      f"{n_down} of {M.shape[0]} ROIs lower at the end",
                      fontsize=9, loc="left")
         ax.legend(fontsize=8, frameon=False)
@@ -219,7 +224,8 @@ def main(argv=None) -> int:
         axes[0][0].set_ylim(args.ymin, args.ymax)
     elif not args.log:
         lo = min(0.0, float(np.nanmin([m[0].min() for m in mats])))
-        axes[0][0].set_ylim(bottom=lo)
+        hi = float(np.nanmax([m[0].max() for m in mats]))
+        axes[0][0].set_ylim(bottom=lo, top=(hi * 1.05 if hi > lo else lo + 1.0))
     fig.tight_layout()
 
     out = args.out.expanduser().resolve()
@@ -229,9 +235,11 @@ def main(argv=None) -> int:
     plt.close(fig)
 
     for s in summary:
+        pc = s["pct_change_first_to_last"]
+        pct_txt = f"({pc:+.0f}%)" if pc is not None else "(no baseline)"
         print(f"{s['label']:20s} n={s['n_roi']:3d}  "
               f"{s['mean_by_run'][0]:8.2f} -> {s['mean_by_run'][-1]:8.2f}  "
-              f"({s['pct_change_first_to_last']:+.0f}%)  "
+              f"{pct_txt:>14s}  "
               f"{s['n_roi_lower_at_end']}/{s['n_roi']} lower")
     with open(out.with_suffix(".json"), "w") as fh:
         json.dump({"values": values, "panels": summary}, fh, indent=2)
