@@ -336,10 +336,31 @@ def main(argv=None) -> int:
     io_["move_bin"] = False
 
     save_path.mkdir(parents=True, exist_ok=True)
+
+    # Stage the chosen files in a directory of their own, as symlinks.
+    #
+    # `file_list` is the documented way to restrict which files Suite2p reads,
+    # and it is not reliable here: a run that selected 24000 frames came back
+    # with 28173, having also read the QC recordings that share the folder. A
+    # directory containing nothing else cannot be over-read whatever the key
+    # does, and the frame-count check at the end still verifies it.
+    stage = save_path / "input"
+    if stage.exists():
+        for old_link in stage.iterdir():
+            old_link.unlink()
+    stage.mkdir(parents=True, exist_ok=True)
+    staged = []
+    for f in files:
+        link = stage / f.name
+        link.symlink_to(f.resolve())
+        staged.append(link)
+    print(f"staged {len(staged)} file(s) in {stage}")
+
     db = dict(suite2p.default_db())
     db.update(
-        data_path=[str(raw)],
-        file_list=[f.name for f in files],   # NOT tiff_list; that key does not exist
+        data_path=[str(stage)],
+        file_list=[f.name for f in staged],  # belt and braces; the directory
+                                             # is what actually guarantees it
         save_path0=str(save_path),
         nplanes=1,
         nchannels=nch,
@@ -368,9 +389,10 @@ def main(argv=None) -> int:
     print(f"F shape {F.shape}")
 
     if F.shape[1] != total:
-        print(f"\nERROR: {F.shape[1]} timepoints but the selected inputs hold {total} "
-              f"frames.\n  Extra frames mean other files were read. Check --pattern and "
-              "that\n  db used 'file_list'.", file=sys.stderr)
+        print(f"\nERROR: {F.shape[1]} timepoints but the selected inputs hold "
+              f"{total} frames.\n  Suite2p read {F.shape[1] - total} frames "
+              "that were not selected, despite the staged\n  input directory. "
+              f"Check what is inside {stage}.", file=sys.stderr)
         return 2
 
     # registration quality, per acquisition
