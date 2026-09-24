@@ -21,11 +21,16 @@
 #   bash run_pipeline.sh --date 20260918        [-s stages]
 #   bash run_pipeline.sh --all                  [-s stages]
 #
-#   stages: meta detect qc auc figs spikes movie cnmf deepcad foopsi compare
+#   stages: meta detect qc auc figs indep spikes movie cnmf deepcad foopsi compare
 #
 #   QC and alignment recordings share the subject and the glob but are not part
 #   of the series, so cond-qc is excluded by default; --cond baseline,wi names
 #   the series explicitly instead.
+#
+#   The indep stage detects cells separately in each acquisition and compares
+#   the populations without pairing them. It survives axial drift, at the cost
+#   of the pairing and of a detectability bias; use it when the drift check in
+#   the qc stage says the plane moved.
 #   default: meta,detect,qc,auc,figs
 #
 # Examples:
@@ -235,6 +240,44 @@ process_one() {
          --events-csv "$AUC/events.csv" --out "$W/fig_representative")
     [ -n "$REP_ROI" ] && rep+=(--roi $REP_ROI)
     run "$ENV_S2P" representative "${rep[@]}"
+  fi
+
+  # --- populations detected independently, for when the plane drifted -------
+  if has indep; then
+    local raw_dir pat_i base_dir f name tag indep_csvs indep_labels
+    raw_dir="$DATASET/raw"
+    indep_csvs=(); indep_labels=()
+    for f in $(ls "$raw_dir"/$pat 2>/dev/null | sort); do
+      name="$(basename "$f" .tif)"
+      case "$name" in *_cond-qc_*) continue;; esac
+      tag="$(printf '%s' "$name" | sed -n 's/.*_\(cond-[^_]*_run-[0-9]*\).*/\1/p')"
+      [ -n "$tag" ] || tag="$name"
+      base_dir="$W/indep/$tag"
+      if [ ! -f "$base_dir/s2p/suite2p/plane0/F.npy" ]; then
+        run "$ENV_S2P" "indep detect $tag" "$SCRIPTS/run_suite2p_series.py" \
+            --dataset "$DATASET" --pattern "$(basename "$f")" \
+            --functional-chan 1 --torch-device "$DEVICE" \
+            --smooth-sigma-time 0 --algorithm cellpose --cellpose-img meanImg \
+            --diameter "$DIAMETER" --exclude-cond "" --min-frames 0 \
+            --save-path "$base_dir/s2p"
+      fi
+      if [ "$DRYRUN" -eq 1 ] || [ -f "$base_dir/s2p/suite2p/plane0/F.npy" ]; then
+        run "$ENV_S2P" "indep auc $tag" "$SCRIPTS/run_event_auc.py" \
+            --s2p-dir "$base_dir/s2p/suite2p/plane0" --dataset "$DATASET" \
+            --ledger "$base_dir/s2p/frame_ledger.csv" --all-roi \
+            --neucoeff "$NEUCOEFF" --smooth matched --fp-method cumulative \
+            --out "$base_dir/eauc"
+        indep_csvs+=("$base_dir/eauc/auc_per_roi_per_run.csv")
+        indep_labels+=("$tag")
+      fi
+    done
+    if [ "${#indep_csvs[@]}" -ge 2 ]; then
+      run "$ENV_S2P" "indep compare" "$SCRIPTS/fig_unpaired.py" \
+          --csv "${indep_csvs[@]}" --labels "${indep_labels[@]}" \
+          --title "$(basename "$DATASET")" --out "$W/fig_unpaired"
+    elif [ "$DRYRUN" -eq 0 ]; then
+      echo "--- [indep] fewer than two acquisitions detected, skipping compare"
+    fi
   fi
 
   if has spikes; then
