@@ -97,6 +97,18 @@ def main(argv=None) -> int:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--dataset", type=Path, required=True)
     p.add_argument("--pattern", default="*.tif", help="glob inside raw/")
+    p.add_argument("--cond", default=None,
+                   help="comma-separated conditions to keep, in this order "
+                        "(e.g. 'baseline,wi'). Overrides --exclude-cond")
+    p.add_argument("--exclude-cond", default="qc",
+                   help="comma-separated conditions to drop. Alignment and "
+                        "focus checks live under the same subject and match "
+                        "the same glob, but they are short, often a different "
+                        "frame size, and are not part of the series")
+    p.add_argument("--min-frames", type=int, default=100,
+                   help="drop acquisitions shorter than this. An aborted "
+                        "recording of a few frames has no usable baseline and "
+                        "would still become its own acquisition in the ledger")
     p.add_argument("--save-path", type=Path, default=None)
     p.add_argument("--fs", type=float, default=None)
     p.add_argument("--pixel-size-um", type=float, default=None)
@@ -144,7 +156,35 @@ def main(argv=None) -> int:
 
     files = sorted(raw.glob(args.pattern), key=order_key)
     if not files:
-        print(f"ERROR: no files matched {args.pattern!r} under {raw}", file=sys.stderr)
+        print(f"ERROR: no files matched {args.pattern!r} under {raw}",
+              file=sys.stderr)
+        return 2
+
+    # --- keep only the conditions that make up the series -------------------
+    # A QC or alignment recording sits in the same folder under the same
+    # subject and matches the same glob, but it is not part of the series:
+    # including it puts a different field, and often a different frame size,
+    # into the shared registration reference.
+    def cond_of(f):
+        m = re.search(r"_cond-([^_]+)", f.name)
+        return m.group(1) if m else ""
+
+    dropped = []
+    if args.cond:
+        want = [c.strip() for c in args.cond.split(",") if c.strip()]
+        rank = {c: i for i, c in enumerate(want)}
+        keep = [f for f in files if cond_of(f) in rank]
+        dropped += [(f, "condition not in --cond") for f in files
+                    if cond_of(f) not in rank]
+        files = sorted(keep, key=lambda f: (rank[cond_of(f)], order_key(f)))
+    elif args.exclude_cond:
+        drop = {c.strip() for c in args.exclude_cond.split(",") if c.strip()}
+        dropped += [(f, "excluded condition") for f in files
+                    if cond_of(f) in drop]
+        files = [f for f in files if cond_of(f) not in drop]
+    if not files:
+        print("ERROR: every file was excluded by --cond / --exclude-cond",
+              file=sys.stderr)
         return 2
 
     # --- acquisition parameters ---------------------------------------------
@@ -173,6 +213,26 @@ def main(argv=None) -> int:
 
     # --- inputs and expected frame count ------------------------------------
     import tifffile
+
+    if args.min_frames > 0:
+        keep, short = [], []
+        for f in files:
+            with tifffile.TiffFile(f) as tf:
+                pages = len(tf.pages)
+            (keep if pages // max(nch, 1) >= args.min_frames
+             else short).append(f)
+        dropped += [(f, f"fewer than {args.min_frames} frames") for f in short]
+        files = keep
+        if not files:
+            print(f"ERROR: every file is shorter than --min-frames "
+                  f"{args.min_frames}", file=sys.stderr)
+            return 2
+
+    if dropped:
+        print(f"\nexcluded {len(dropped)} file(s):")
+        for f, why in sorted(dropped, key=lambda x: x[0].name):
+            print(f"  {f.name:54s} {why}")
+
     ledger, total, shapes = [], 0, set()
     conds = [re.search(r"_cond-([^_]+)", f.name) for f in files]
     conds = [c.group(1) if c else "?" for c in conds]
@@ -193,7 +253,10 @@ def main(argv=None) -> int:
         print(f"  {f.name:52s} {n:6d} frames  [{total} .. {total + n - 1}]")
         total += n
     if len(shapes) > 1:
-        print(f"ERROR: inconsistent frame shapes {shapes}", file=sys.stderr)
+        print(f"\nERROR: the selected files are not all the same size: "
+              f"{shapes}.\n  One registration reference cannot span two frame "
+              "sizes. Narrow the\n  selection with --cond, or widen "
+              "--exclude-cond.", file=sys.stderr)
         return 2
     ny, nx = shapes.pop()
     print(f"  total {total} frames = {total / fs / 60:.1f} min at {fs:.4g} Hz, "
@@ -352,6 +415,7 @@ def main(argv=None) -> int:
             "n_frames": total, "frame_shape_px": [int(ny), int(nx)],
             "fs_hz": float(fs), "pixel_size_um": float(px) if px else None,
             "nchannels": nch, "functional_chan": args.functional_chan,
+            "excluded": [{"file": f.name, "reason": w} for f, w in dropped],
             "n_roi_detected": int(len(stat)),
             "n_roi_iscell": int(iscell[:, 0].sum()),
             "ledger": ledger,

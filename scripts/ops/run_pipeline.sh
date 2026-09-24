@@ -22,6 +22,10 @@
 #   bash run_pipeline.sh --all                  [-s stages]
 #
 #   stages: meta detect qc auc figs spikes movie cnmf deepcad foopsi compare
+#
+#   QC and alignment recordings share the subject and the glob but are not part
+#   of the series, so cond-qc is excluded by default; --cond baseline,wi names
+#   the series explicitly instead.
 #   default: meta,detect,qc,auc,figs
 #
 # Examples:
@@ -56,6 +60,9 @@ DEVICE="${TORCH_DEVICE:-cuda}"
 DIAMETER="${DIAMETER:-10}"
 NEUCOEFF="${NEUCOEFF:-0}"
 CELLPROB=""
+COND="${COND:-}"
+EXCLUDE_COND="${EXCLUDE_COND:-qc}"
+MIN_FRAMES="${MIN_FRAMES:-100}"
 BASE_RUN="${BASE_RUN:-1}"
 COLOR_UP="${COLOR_UP:-#ff4b00}"
 COLOR_DOWN="${COLOR_DOWN:-#005aff}"
@@ -79,6 +86,9 @@ while [ $# -gt 0 ]; do
     --diameter)     DIAMETER="$2"; shift 2;;
     --neucoeff)     NEUCOEFF="$2"; shift 2;;
     --cellprob)     CELLPROB="$2"; shift 2;;
+    --cond)         COND="$2"; shift 2;;
+    --exclude-cond) EXCLUDE_COND="$2"; shift 2;;
+    --min-frames)   MIN_FRAMES="$2"; shift 2;;
     --base-run)     BASE_RUN="$2"; shift 2;;
     --roi)          REP_ROI="$2"; shift 2;;
     -n|--dry-run)   DRYRUN=1; shift;;
@@ -174,8 +184,11 @@ process_one() {
     args=("$SCRIPTS/run_suite2p_series.py" --dataset "$DATASET"
           --pattern "$pat" --functional-chan 1 --torch-device "$DEVICE"
           --smooth-sigma-time 0 --algorithm cellpose --cellpose-img meanImg
-          --diameter "$DIAMETER" --save-path "$W/s2p_series")
+          --diameter "$DIAMETER" --min-frames "$MIN_FRAMES"
+          --save-path "$W/s2p_series")
     [ -n "$CELLPROB" ] && args+=(--cellprob-threshold "$CELLPROB")
+    if [ -n "$COND" ]; then args+=(--cond "$COND")
+    else args+=(--exclude-cond "$EXCLUDE_COND"); fi
     run "$ENV_S2P" detect "${args[@]}"
   fi
 
