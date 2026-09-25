@@ -57,8 +57,15 @@ def _z_of(pct):
 
 
 def robust_sd(F):
+    """Noise scale from frame-to-frame differences. NOT valid after smoothing."""
     d = np.abs(np.diff(F, axis=1))
     return np.median(d, axis=1) / (np.sqrt(2) * 0.6745)
+
+
+def sd_from_values(F):
+    """Noise scale from the spread of the values, valid on a smoothed trace."""
+    F = np.asarray(F, float)
+    return np.array([1.4826 * np.median(np.abs(x - np.median(x))) for x in F])
 
 
 def rolling_baseline(F, win, pct=10.0, correct_bias=True):
@@ -79,15 +86,15 @@ def rolling_baseline(F, win, pct=10.0, correct_bias=True):
     out = np.empty_like(F, np.float32)
     for i in range(F.shape[0]):
         out[i] = np.interp(np.arange(n), centres, vals[i])
-    if correct_bias:
-        out = out + (abs(_z_of(pct)) * robust_sd(F))[:, None]
+    if correct_bias and pct < 50:
+        out = out + (abs(_z_of(pct)) * sd_from_values(F))[:, None]
     return out
 
 
-def fixed_baseline(F, a, b, pct=10.0, correct_bias=True):
+def fixed_baseline(F, a, b, pct=50.0, correct_bias=False):
     v = np.percentile(F[:, a:b], pct, axis=1).astype(np.float32)
-    if correct_bias:
-        v = v + abs(_z_of(pct)) * robust_sd(F[:, a:b])
+    if correct_bias and pct < 50:
+        v = v + abs(_z_of(pct)) * sd_from_values(F[:, a:b])
     return v[:, None]
 
 
@@ -112,8 +119,14 @@ def main(argv=None) -> int:
     p.add_argument("--neucoeff", type=float, default=0.0)
     p.add_argument("--baseline", choices=["rolling", "fixed"], default="rolling")
     p.add_argument("--baseline-window-s", type=float, default=45.0)
-    p.add_argument("--baseline-percentile", type=float, default=10.0)
-    p.add_argument("--no-bias-correction", dest="bias", action="store_false")
+    p.add_argument("--baseline-percentile", type=float, default=50.0,
+                   help="50 (the median) keeps the positive and negative areas "
+                        "comparable: pure noise then gives a ratio of one")
+    p.add_argument("--bias-correction", dest="bias", action="store_true",
+                   help="only meaningful below the 50th percentile; the sigma "
+                        "it needs is estimated from the values, not from "
+                        "frame-to-frame differences, so it stays valid on a "
+                        "denoised trace")
     p.add_argument("--all-roi", action="store_true")
     p.add_argument("--trace-rois", type=int, nargs="*", default=None,
                    help="ROIs to draw; default is the first --n-trace")
@@ -196,9 +209,10 @@ def main(argv=None) -> int:
             print(f"{lab:12s} {k:>3} {pos:10.2f} {neg:10.2f} {net:10.2f} "
                   f"{ratio:8.3f}")
 
-    print("\nneg/pos near 1 means the AUC is what is left after two nearly "
-          "equal areas\ncancel, so it rests on that cancellation rather than "
-          "on signal.")
+    print("\nWith a median baseline, pure noise gives neg/pos = 1 by "
+          "construction. A ratio\nnear one therefore means the net AUC is "
+          "what survives the cancellation of two\nnearly equal areas, rather "
+          "than resting on signal.")
 
     with open(out / "auc_area_split.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
