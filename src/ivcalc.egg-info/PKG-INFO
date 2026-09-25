@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: ivcalc
+Version: 0.2.0
+Summary: In vivo calcium imaging analysis (Suite2p series pipeline)
+Requires-Python: >=3.11
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: pyyaml
+Requires-Dist: tifffile
+Requires-Dist: matplotlib
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pyflakes; extra == "dev"
+Provides-Extra: s2p
+Requires-Dist: suite2p; extra == "s2p"
+Provides-Extra: movie
+Requires-Dist: opencv-python-headless; extra == "movie"
