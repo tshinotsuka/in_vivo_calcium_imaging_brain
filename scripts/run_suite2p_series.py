@@ -91,12 +91,158 @@ def order_key(p: Path):
             idx, name)
 
 
+def detect_in_movie(args, save_path: Path) -> int:
+    """Detect ROIs in a movie that has already been registered.
+
+    Registration is switched off rather than repeated. A denoised movie comes
+    out of the same registration as the raw one, so aligning it again would fit
+    a second reference and move it relative to the ROI set that every other
+    analysis shares.
+
+    With --split-frames the movie is cut into equal pieces and each is detected
+    on its own, which is the unpaired route: nothing has to correspond between
+    pieces, so a plane that drifted no longer invalidates the comparison. The
+    cost is that the populations are different cells, and that detection
+    depends on how visible a cell is, so a piece where the preparation was
+    dimmer contributes fewer and brighter cells.
+    """
+    import suite2p
+    import tifffile
+
+    src = args.movie.expanduser().resolve()
+    if not src.exists():
+        print(f"ERROR: no such movie {src}", file=sys.stderr)
+        return 2
+    with tifffile.TiffFile(src) as tf:
+        n_t = len(tf.pages)
+        ny, nx = tf.pages[0].shape[:2]
+    print(f"movie: {src.name}  {n_t} frames  {ny} x {nx}")
+
+    fs, px = args.fs, args.pixel_size_um
+    meta = args.dataset.expanduser().resolve() / "raw" / "metadata.yaml"
+    if meta.exists() and (fs is None or px is None):
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from run_roi_suite2p import resolve_from_metadata
+            info = resolve_from_metadata(meta)
+            fs = fs if fs is not None else info.get("fs_hz")
+            px = px if px is not None else info.get("pixel_size_um")
+        except Exception as e:  # noqa: BLE001
+            print(f"metadata unreadable: {e}", file=sys.stderr)
+    if fs is None:
+        print("ERROR: pass --fs or --dataset", file=sys.stderr)
+        return 2
+
+    diameter = args.diameter
+    if diameter is None and px:
+        diameter = int(round(args.soma_um / px))
+
+    pieces = ([(0, n_t)] if not args.split_frames
+              else [(a, min(a + args.split_frames, n_t))
+                    for a in range(0, n_t, args.split_frames)
+                    if min(a + args.split_frames, n_t) - a >= args.split_frames // 2])
+    if len(pieces) > 1:
+        print(f"detecting independently in {len(pieces)} piece(s) of "
+              f"{args.split_frames} frames")
+
+    params = inspect.signature(suite2p.run_s2p).parameters
+    if "settings" not in params:
+        print("ERROR: this script targets the suite2p 1.1 API", file=sys.stderr)
+        return 2
+
+    mov = tifffile.memmap(str(src))
+    ok = 0
+    for k, (a, b) in enumerate(pieces, start=1):
+        out = save_path if len(pieces) == 1 else save_path / f"piece{k:02d}"
+        stage = out / "input"
+        stage.mkdir(parents=True, exist_ok=True)
+        for old_f in stage.iterdir():
+            old_f.unlink()
+        chunk = out / "input" / f"{src.stem}_{k:02d}.tif"
+        tifffile.imwrite(chunk, np.asarray(mov[a:b]))
+
+        settings = copy.deepcopy(params["settings"].default)
+        settings["fs"] = float(fs)
+        settings["tau"] = args.tau
+        settings["torch_device"] = args.torch_device
+        if diameter:
+            settings["diameter"] = [float(diameter), float(diameter)]
+        run = settings.setdefault("run", {})
+        run["do_registration"] = 0          # already registered
+        run["do_regmetrics"] = False
+        run["do_detection"] = True
+        run["do_deconvolution"] = False
+        det = settings.setdefault("detection", {})
+        det["algorithm"] = args.algorithm
+        det["threshold_scaling"] = args.threshold_scaling
+        if args.algorithm == "cellpose":
+            cp = det.setdefault("cellpose_settings", {})
+            cp["img"] = args.cellpose_img
+            if args.cellprob_threshold is not None:
+                cp["cellprob_threshold"] = args.cellprob_threshold
+        else:
+            det.setdefault("sparsery_settings", {})["spatial_scale"] = \
+                args.spatial_scale
+        io_ = settings.setdefault("io", {})
+        io_["delete_bin"] = False
+        io_["move_bin"] = False
+
+        db = dict(suite2p.default_db())
+        db.update(data_path=[str(stage)], file_list=[chunk.name],
+                  nplanes=1, nchannels=1, functional_chan=1,
+                  save_path0=str(out), keep_movie_raw=False)
+        print(f"\n[{k}/{len(pieces)}] frames [{a} .. {b - 1}] -> {out}")
+        suite2p.run_s2p(db=db, settings=settings)
+
+        plane = out / "suite2p" / "plane0"
+        if not plane.exists():
+            cands = sorted(out.glob("**/plane0"))
+            if cands:
+                plane = cands[0]
+        F = np.load(plane / "F.npy")
+        iscell = np.load(plane / "iscell.npy")
+        print(f"  {F.shape[0]} ROIs, classifier accepts "
+              f"{int(iscell[:, 0].sum())}, {F.shape[1]} timepoints")
+        if F.shape[1] != b - a:
+            print(f"  ERROR: {F.shape[1]} timepoints for {b - a} frames",
+                  file=sys.stderr)
+            return 2
+        with open(out / "frame_ledger.csv", "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["source_file", "frame_start", "frame_end", "n_frames"])
+            w.writerow([f"{src.stem}_{k:02d}", 0, b - a - 1, b - a])
+        chunk.unlink(missing_ok=True)
+        ok += 1
+
+    with open(save_path / "movie_detect_record.json", "w") as fh:
+        json.dump({"date_run": dt.date.today().isoformat(), "movie": str(src),
+                   "n_frames": n_t, "frame_shape_px": [int(ny), int(nx)],
+                   "fs_hz": float(fs), "registration": "off (already registered)",
+                   "pieces": [[int(a), int(b)] for a, b in pieces],
+                   "diameter": diameter, "algorithm": args.algorithm},
+                  fh, indent=2)
+    print(f"\ndetected in {ok} piece(s); wrote movie_detect_record.json")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description="one Suite2p run over a series of acquisitions",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--dataset", type=Path, required=True)
     p.add_argument("--pattern", default="*.tif", help="glob inside raw/")
+    p.add_argument("--movie", type=Path, default=None,
+                   help="detect in this TIFF instead of the dataset's raw "
+                        "files, with registration switched off. For a movie "
+                        "that has already been registered -- a denoised one, "
+                        "say -- running registration again would align it to "
+                        "a second reference and shift it away from the ROIs "
+                        "everything else uses")
+    p.add_argument("--split-frames", type=int, default=None,
+                   help="with --movie, treat every N frames as a separate "
+                        "acquisition and detect in each independently. This is "
+                        "the unpaired route: no cell has to correspond between "
+                        "acquisitions, so it survives a plane that drifted")
     p.add_argument("--cond", default=None,
                    help="comma-separated conditions to keep, in this order "
                         "(e.g. 'baseline,wi'). Overrides --exclude-cond")
@@ -170,6 +316,10 @@ def main(argv=None) -> int:
     ds = args.dataset.expanduser().resolve()
     raw = ds / "raw"
     save_path = (args.save_path or ds / "work" / "s2p_series").expanduser().resolve()
+
+    # --- detect in a movie that is already registered -----------------------
+    if args.movie is not None:
+        return detect_in_movie(args, save_path)
 
     files = sorted(raw.glob(args.pattern), key=order_key)
     if not files:

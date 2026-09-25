@@ -21,7 +21,8 @@
 #   bash run_pipeline.sh --date 20260918        [-s stages]
 #   bash run_pipeline.sh --all                  [-s stages]
 #
-#   stages: meta detect qc auc figs indep spikes movie cnmf deepcad foopsi compare
+#   stages: meta detect qc auc figs indep indep_dn spikes movie
+#           cnmf deepcad foopsi compare
 #
 #   QC and alignment recordings share the subject and the glob but are not part
 #   of the series, so cond-qc is excluded by default; --cond baseline,wi names
@@ -68,6 +69,7 @@ CELLPROB=""
 COND="${COND:-}"
 EXCLUDE_COND="${EXCLUDE_COND:-qc}"
 MIN_FRAMES="${MIN_FRAMES:-100}"
+SPLIT_FRAMES="${SPLIT_FRAMES:-4000}"
 BASE_RUN="${BASE_RUN:-1}"
 COLOR_UP="${COLOR_UP:-#ff4b00}"
 COLOR_DOWN="${COLOR_DOWN:-#005aff}"
@@ -94,6 +96,7 @@ while [ $# -gt 0 ]; do
     --cond)         COND="$2"; shift 2;;
     --exclude-cond) EXCLUDE_COND="$2"; shift 2;;
     --min-frames)   MIN_FRAMES="$2"; shift 2;;
+    --split-frames) SPLIT_FRAMES="$2"; shift 2;;
     --base-run)     BASE_RUN="$2"; shift 2;;
     --roi)          REP_ROI="$2"; shift 2;;
     -n|--dry-run)   DRYRUN=1; shift;;
@@ -240,6 +243,45 @@ process_one() {
          --events-csv "$AUC/events.csv" --out "$W/fig_representative")
     [ -n "$REP_ROI" ] && rep+=(--roi $REP_ROI)
     run "$ENV_S2P" representative "${rep[@]}"
+  fi
+
+  # --- the same, on the denoised movies ------------------------------------
+  # Detection there has to skip registration: the denoised movie came out of
+  # the same registration as the raw one, so aligning it again would fit a
+  # second reference and move it relative to everything else.
+  if has indep_dn; then
+    local vv mv per
+    per="${SPLIT_FRAMES:-4000}"
+    for vv in cnmf deepcad; do
+      mv="$W/registered_$vv.tif"
+      [ -f "$mv" ] || { echo "--- [indep $vv] no $mv, skipping"; continue; }
+      if [ ! -d "$W/indep_$vv/piece01" ]; then
+        run "$ENV_S2P" "indep detect $vv" "$SCRIPTS/run_suite2p_series.py" \
+            --dataset "$DATASET" --movie "$mv" --split-frames "$per" \
+            --torch-device "$DEVICE" --algorithm cellpose \
+            --cellpose-img meanImg --diameter "$DIAMETER" \
+            --save-path "$W/indep_$vv"
+      fi
+      local dn_csvs dn_labels pd
+      dn_csvs=(); dn_labels=()
+      for pd in "$W/indep_$vv"/piece*; do
+        [ -d "$pd" ] || continue
+        run "$ENV_S2P" "indep auc $vv $(basename "$pd")" \
+            "$SCRIPTS/run_event_auc.py" \
+            --s2p-dir "$pd/suite2p/plane0" --dataset "$DATASET" \
+            --ledger "$pd/frame_ledger.csv" --all-roi \
+            --neucoeff "$NEUCOEFF" --smooth matched --fp-method cumulative \
+            --out "$pd/eauc"
+        dn_csvs+=("$pd/eauc/auc_per_roi_per_run.csv")
+        dn_labels+=("$(basename "$pd")")
+      done
+      if [ "${#dn_csvs[@]}" -ge 2 ]; then
+        run "$ENV_S2P" "indep compare $vv" "$SCRIPTS/fig_unpaired.py" \
+            --csv "${dn_csvs[@]}" --labels "${dn_labels[@]}" \
+            --title "$(basename "$DATASET") $vv" \
+            --out "$W/fig_unpaired_$vv"
+      fi
+    done
   fi
 
   # --- populations detected independently, for when the plane drifted -------
