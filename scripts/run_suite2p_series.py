@@ -137,7 +137,24 @@ def main(argv=None) -> int:
                    help="max binned frames used for detection")
     p.add_argument("--tau", type=float, default=0.5)
     p.add_argument("--nonrigid", action="store_true",
-                   help="piecewise-rigid registration (refused on a small field)")
+                   help="add a piecewise-rigid pass. Suite2p runs it AFTER the "
+                        "rigid one within the same pass, so this gives the "
+                        "rigid-then-non-rigid sequence NoRMCorre uses, and "
+                        "two-step registration then repeats the pair against a "
+                        "refined reference")
+    p.add_argument("--block-size", type=int, nargs=2, default=None,
+                   metavar=("Y", "X"),
+                   help="non-rigid block size in pixels. Suite2p's default of "
+                        "128 leaves a single block on a 128-pixel field, which "
+                        "is just the rigid shift again; 32 or 48 gives a real "
+                        "grid. Required to use --nonrigid on a small field")
+    p.add_argument("--snr-thresh", type=float, default=1.2,
+                   help="a block whose correlation peak is weaker than this "
+                        "keeps the rigid shift instead of its own. Raise it at "
+                        "low signal-to-noise, where a per-block estimate "
+                        "follows the noise")
+    p.add_argument("--maxregshift-nr", type=float, default=5.0,
+                   help="largest shift a single block may take, in pixels")
     p.add_argument("--nonrigid-min-size", type=int, default=256)
     p.add_argument("--maxregshift", type=float, default=0.1)
     p.add_argument("--smooth-sigma-time", type=float, default=1.0,
@@ -263,12 +280,23 @@ def main(argv=None) -> int:
           f"{ny} x {nx} px")
 
     nonrigid = args.nonrigid
-    if nonrigid and min(ny, nx) < args.nonrigid_min_size and not args.force:
-        print(f"\nERROR: refusing non-rigid registration on a {ny}x{nx} field. The "
-              "default\n  block size leaves about one block per dimension, and at low "
-              "SNR the\n  per-block shift estimate fits noise. Use rigid, or --force.",
-              file=sys.stderr)
-        return 2
+    block = tuple(args.block_size) if args.block_size else None
+    if nonrigid and min(ny, nx) < args.nonrigid_min_size:
+        if block is None and not args.force:
+            print(f"\nERROR: non-rigid registration on a {ny}x{nx} field needs an "
+                  "explicit --block-size.\n  Suite2p's default of 128 leaves one "
+                  "block on a field this size, which just\n  repeats the rigid "
+                  "shift. Try --block-size 32 32 (a 4x4 grid here) or 48 48.",
+                  file=sys.stderr)
+            return 2
+        if block is not None:
+            grid = (ny / block[0], nx / block[1])
+            print(f"\nnon-rigid: {block[0]}x{block[1]} blocks, about "
+                  f"{grid[0]:.1f}x{grid[1]:.1f} of them across the field")
+            if min(grid) < 2:
+                print("  fewer than two blocks in a dimension: this is close to "
+                      "a rigid shift.\n  Use a smaller --block-size for a real "
+                      "grid.", file=sys.stderr)
 
     diameter = args.diameter
     if diameter is None and px:
@@ -279,7 +307,7 @@ def main(argv=None) -> int:
 
     if args.dry_run:
         print(f"\n--dry-run: would write to {save_path}")
-        print(f"  registration: {'non-rigid' if nonrigid else 'rigid'}, one reference "
+        print(f"  registration: {'rigid then non-rigid' if nonrigid else 'rigid'}, one reference "
               f"across all {len(files)} acquisition(s)")
         print(f"  detection: {args.algorithm}, diameter={diameter}")
         return 0
@@ -306,6 +334,15 @@ def main(argv=None) -> int:
 
     reg = settings.setdefault("registration", {})
     reg["nonrigid"] = nonrigid
+    if nonrigid:
+        # the non-rigid parameters live in their own group in some versions and
+        # beside the others in the rest; set whichever exists
+        nr = reg.get("nonrigid_settings")
+        target = nr if isinstance(nr, dict) else reg
+        if block is not None:
+            target["block_size"] = list(block)
+        target["snr_thresh"] = args.snr_thresh
+        target["maxregshiftNR"] = args.maxregshift_nr
     reg["maxregshift"] = args.maxregshift
     reg["smooth_sigma_time"] = args.smooth_sigma_time
     reg["two_step_registration"] = args.two_step
@@ -369,7 +406,9 @@ def main(argv=None) -> int:
     )
 
     print(f"\nrunning Suite2p on {args.torch_device}")
-    print(f"  {len(files)} file(s), one reference, {'non-rigid' if nonrigid else 'rigid'}")
+    print(f"  {len(files)} file(s), one reference, "
+          + ("rigid then non-rigid" if nonrigid else "rigid")
+          + (", two-step" if args.two_step else ""))
     print(f"  nchannels={nch}  functional_chan={args.functional_chan}")
     print(f"  detection={args.algorithm}  diameter={settings.get('diameter')}"
           + ("  denoise=True" if det.get("denoise") else ""))

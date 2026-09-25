@@ -117,7 +117,13 @@ def main(argv=None) -> int:
     p.add_argument("--out", type=Path, required=True, help="output directory")
     p.add_argument("--fs", type=float, default=None)
     p.add_argument("--neucoeff", type=float, default=0.0)
-    p.add_argument("--baseline", choices=["rolling", "fixed"], default="rolling")
+    p.add_argument("--baseline", choices=["maximin", "rolling", "fixed"],
+                   default="maximin",
+                   help="'maximin' is Suite2p's own. Note that it sits below "
+                        "the resting level, so pure noise gives about twice as "
+                        "much positive as negative area: the null for the "
+                        "ratio below is roughly 0.47, not 1. 'rolling' uses a "
+                        "running median, whose null IS 1")
     p.add_argument("--baseline-window-s", type=float, default=45.0)
     p.add_argument("--baseline-percentile", type=float, default=50.0,
                    help="50 (the median) keeps the positive and negative areas "
@@ -168,12 +174,27 @@ def main(argv=None) -> int:
                              int(r["frame_end"]) + 1))
     win_b = int(round(args.baseline_window_s * fs))
 
+    if args.baseline == "maximin":
+        print("\nbaseline: maximin (Suite2p default). It follows the floor of "
+              "the trace, so\npure noise gives neg/pos of about 0.47 rather "
+              "than 1; read the ratios against\nthat, or pass --baseline "
+              "rolling for a median baseline whose null is 1.")
+
     variants = []
     for plane, lab in zip(args.s2p_dir, labels):
         Fc = load_traces(plane.expanduser().resolve(), args.neucoeff, args.all_roi)
         if not segs:
             segs = [("all", 0, Fc.shape[1])]
-        if args.baseline == "rolling":
+        if args.baseline == "maximin":
+            from scipy.ndimage import (gaussian_filter1d, maximum_filter1d,
+                                       minimum_filter1d)
+            F0 = np.empty_like(Fc)
+            wmm = max(int(round(60.0 * fs)), 3)
+            for _, a, b in segs:
+                g = gaussian_filter1d(Fc[:, a:b], 10.0, axis=-1)
+                F0[:, a:b] = maximum_filter1d(
+                    minimum_filter1d(g, wmm, axis=-1), wmm, axis=-1)
+        elif args.baseline == "rolling":
             F0 = np.empty_like(Fc)
             for _, a, b in segs:
                 F0[:, a:b] = rolling_baseline(Fc[:, a:b], win_b,

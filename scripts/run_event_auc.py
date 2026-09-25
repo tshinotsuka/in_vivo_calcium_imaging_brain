@@ -57,12 +57,41 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------------
 
 
+def maximin_baseline(F: np.ndarray, fs: float, win_baseline: float = 60.0,
+                     sig_baseline: float = 10.0) -> np.ndarray:
+    """Suite2p's own baseline: gaussian smooth, running minimum, running maximum.
+
+    The running minimum follows the floor of the trace rather than its centre,
+    so transients cannot pull the baseline up with them however dense they get,
+    and the running maximum undoes the downward shift the minimum introduced.
+    Slow drift is removed because the window is short compared with a session
+    and long compared with a transient.
+
+    Two consequences worth knowing before reading numbers off it.
+
+    The baseline sits BELOW the resting level, not on it, so most of the trace
+    lies above it: pure noise gives roughly twice as much positive as negative
+    area. Any test that treats the two as a symmetric null has to use a median
+    baseline instead, or measure its own null.
+
+    And because the floor is not the resting level, dF/F carries an offset that
+    depends on the noise. A change in activity is therefore recovered
+    conservatively: in synthetic data a true fall of 75% reads as 57%.
+    """
+    from scipy.ndimage import (gaussian_filter1d, maximum_filter1d,
+                               minimum_filter1d)
+    F = np.asarray(F, np.float32)
+    w = max(int(round(win_baseline * fs)), 3)
+    g = gaussian_filter1d(F, sig_baseline, axis=-1)
+    return maximum_filter1d(minimum_filter1d(g, w, axis=-1), w, axis=-1)
+
+
 def percentile_filter(F: np.ndarray, win: int, pct: float = 50.0) -> np.ndarray:
     """Running percentile baseline, evaluated on a coarse grid and interpolated.
 
-    The 50th percentile in a window of roughly 15 s is the baseline definition
-    used in the source method. A median is not biased downward by noise the way
-    a low percentile is, so no bias correction is needed here.
+    A median is not biased downward by noise the way a low percentile is, so no
+    bias correction is needed, and it puts half the noise on each side of
+    itself, which is what makes a positive/negative comparison meaningful.
     """
     n = F.shape[1]
     win = max(int(win), 3)
@@ -495,8 +524,19 @@ def main(argv=None) -> int:
     p.add_argument("--fs", type=float, default=None)
     p.add_argument("--pixel-size-um", type=float, default=None)
     p.add_argument("--neucoeff", type=float, default=0.7)
-    p.add_argument("--baseline-window-s", type=float, default=15.0,
-                   help="window for the running median baseline")
+    p.add_argument("--baseline", choices=["maximin", "median"],
+                   default="maximin",
+                   help="'maximin' is Suite2p's own: smooth, running minimum, "
+                        "running maximum. 'median' is a running 50th "
+                        "percentile, which recovers a change in activity more "
+                        "faithfully and gives a symmetric noise null, but "
+                        "rides up when transients are dense")
+    p.add_argument("--baseline-window-s", type=float, default=None,
+                   help="baseline window; default 60 s for maximin, 15 s for "
+                        "median")
+    p.add_argument("--sig-baseline", type=float, default=10.0,
+                   help="frames of gaussian smoothing before the running "
+                        "minimum (maximin only)")
     p.add_argument("--smooth", choices=["exp", "matched", "none"], default="exp",
                    help="'exp' reproduces the published method; 'matched' filters "
                         "with the indicator's own decay and recovers roughly a "
@@ -647,9 +687,25 @@ def main(argv=None) -> int:
     # --- dF/F, per acquisition so a baseline never spans a boundary ---------
     Fc = F - args.neucoeff * Fneu
     F0 = np.empty_like(Fc)
+    if args.baseline_window_s is None:
+        args.baseline_window_s = 60.0 if args.baseline == "maximin" else 15.0
     win_b = int(round(args.baseline_window_s * fs))
+    # computed within each acquisition, so a window never spans a join and a
+    # step in brightness at a boundary is not smeared across both sides
     for _, a, b in segs:
-        F0[:, a:b] = percentile_filter(Fc[:, a:b], win_b, 50.0)
+        if args.baseline == "maximin":
+            F0[:, a:b] = maximin_baseline(Fc[:, a:b], fs,
+                                          args.baseline_window_s,
+                                          args.sig_baseline)
+        else:
+            F0[:, a:b] = percentile_filter(Fc[:, a:b], win_b, 50.0)
+    print(f"baseline: {args.baseline}, window {args.baseline_window_s:g} s"
+          + (f", smoothing {args.sig_baseline:g} frames"
+             if args.baseline == "maximin" else ""))
+    if args.baseline == "maximin":
+        print("  the maximin baseline follows the floor of the trace, not its "
+              "resting level,\n  so a change in activity is recovered "
+              "conservatively: a synthetic fall of 75%\n  reads as about 57%.")
     df_raw = (Fc - F0).astype(np.float32)     # absolute units, same baseline
     d = (Fc - F0) / np.maximum(F0, 1.0) * 100.0
     if args.smooth == "matched":
@@ -1030,6 +1086,7 @@ def main(argv=None) -> int:
                           "indicator_tau_s": args.indicator_tau_s,
                           "fp_method": args.fp_method,
                           "roi_alpha": args.roi_alpha,
+                          "baseline": args.baseline,
                           "onset_sd": args.onset_sd, "offset_sd": args.offset_sd,
                           "min_duration_s": args.min_duration_s,
                           "fp_max": args.fp_max,
